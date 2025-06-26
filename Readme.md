@@ -1,4 +1,4 @@
-# 🔐 Microsoft Entra Conditional Access Management Tool
+# 🔐 Microsoft Entra Conditional Access Management Tool (geo-IP blocking focus)
 
 A powerful GUI-based PowerShell tool for managing Microsoft Entra (Azure AD) Conditional Access policies and Named Locations with ease.
 
