@@ -8,21 +8,36 @@
 #>
 
 # Check PowerShell version first (before loading anything)
+# PowerShell Core is now supported
 if ($PSVersionTable.PSEdition -eq "Core") {
-    Write-Warning "You are running PowerShell Core. This script requires Windows PowerShell 5.1"
-    Write-Host "Please run this script in Windows PowerShell (powershell.exe, not pwsh.exe)" -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
-    exit
+    Write-Host "Running in PowerShell Core (pwsh) - Windows Forms support enabled" -ForegroundColor Green
+    
+    # Check if we're on Windows (required for Windows Forms)
+    if ($IsWindows -eq $false) {
+        Write-Error "This script requires Windows to run. Windows Forms is not available on non-Windows platforms."
+        Write-Host "Please run this script on a Windows machine or in Windows Subsystem for Linux (WSL)." -ForegroundColor Yellow
+        Read-Host "Press Enter to exit"
+        exit
+    }
+} else {
+    Write-Host "Running in Windows PowerShell" -ForegroundColor Green
 }
 
 # Load assemblies and configure immediately (must be done before ANY Windows Forms objects are created)
 try {
     Write-Host "Loading Windows Forms assemblies..." -ForegroundColor Green
     
-    # Load assemblies first
+    # Load assemblies first - works in both PowerShell Core and Windows PowerShell
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing  
-    Add-Type -AssemblyName Microsoft.VisualBasic
+    
+    # Only load Microsoft.VisualBasic if available (may not be in PowerShell Core)
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        Write-Host "Microsoft.VisualBasic loaded successfully." -ForegroundColor Green
+    } catch {
+        Write-Host "Microsoft.VisualBasic not available, using custom InputBox implementation." -ForegroundColor Yellow
+    }
     
     Write-Host "Configuring Windows Forms rendering..." -ForegroundColor Green
     
@@ -52,6 +67,70 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
     Write-Host "Please run: Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Yellow
     Read-Host "Press Enter to exit"
     exit
+}
+
+# PowerShell Core compatible InputBox function
+function Show-InputBox {
+    param(
+        [string]$Prompt,
+        [string]$Title = "Input",
+        [string]$DefaultValue = ""
+    )
+    
+    # Try to use native InputBox if Microsoft.VisualBasic is available
+    try {
+        if ([System.Management.Automation.PSTypeName]'Microsoft.VisualBasic.Interaction').Type) {
+            return [Microsoft.VisualBasic.Interaction]::InputBox($Prompt, $Title, $DefaultValue)
+        }
+    } catch {
+        # Fall through to custom implementation
+    }
+    
+    # Custom InputBox implementation for PowerShell Core
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $Title
+    $form.Size = New-Object System.Drawing.Size(400, 150)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = $Prompt
+    $label.Location = New-Object System.Drawing.Point(10, 20)
+    $label.Size = New-Object System.Drawing.Size(360, 20)
+    $form.Controls.Add($label)
+
+    $textBox = New-Object System.Windows.Forms.TextBox
+    $textBox.Location = New-Object System.Drawing.Point(10, 45)
+    $textBox.Size = New-Object System.Drawing.Size(360, 20)
+    $textBox.Text = $DefaultValue
+    $form.Controls.Add($textBox)
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "OK"
+    $okButton.Location = New-Object System.Drawing.Point(210, 75)
+    $okButton.Size = New-Object System.Drawing.Size(75, 23)
+    $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(295, 75)
+    $cancelButton.Size = New-Object System.Drawing.Size(75, 23)
+    $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $form.Controls.Add($cancelButton)
+
+    $form.AcceptButton = $okButton
+    $form.CancelButton = $cancelButton
+
+    $result = $form.ShowDialog()
+    
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        return $textBox.Text
+    } else {
+        return $null
+    }
 }
 
 # Global Variables
@@ -762,7 +841,7 @@ function Show-CountryLocationDialog {
     
     $form = New-Object System.Windows.Forms.Form
     $form.Text = $Mode + " Country Named Location"
-    $form.Size = New-Object System.Drawing.Size(500, 300)
+    $form.Size = New-Object System.Drawing.Size(500, 350)
     $form.StartPosition = "CenterParent"
     $form.FormBorderStyle = "FixedDialog"
 
@@ -780,20 +859,51 @@ function Show-CountryLocationDialog {
 
     # Countries
     $countriesLabel = New-Object System.Windows.Forms.Label
-    $countriesLabel.Text = "Country Codes (e.g., US,CA,GB):"
+    $countriesLabel.Text = "Country Codes:"
     $countriesLabel.Location = New-Object System.Drawing.Point(10, 60)
-    $countriesLabel.Size = New-Object System.Drawing.Size(200, 20)
+    $countriesLabel.Size = New-Object System.Drawing.Size(100, 20)
     $form.Controls.Add($countriesLabel)
 
     $countriesTextBox = New-Object System.Windows.Forms.TextBox
     $countriesTextBox.Location = New-Object System.Drawing.Point(10, 85)
-    $countriesTextBox.Size = New-Object System.Drawing.Size(460, 20)
+    $countriesTextBox.Size = New-Object System.Drawing.Size(350, 20)
+    $countriesTextBox.ReadOnly = $true
     $form.Controls.Add($countriesTextBox)
+
+    # Select Countries Button
+    $selectCountriesButton = New-Object System.Windows.Forms.Button
+    $selectCountriesButton.Text = "Select Countries"
+    $selectCountriesButton.Location = New-Object System.Drawing.Point(370, 83)
+    $selectCountriesButton.Size = New-Object System.Drawing.Size(100, 25)
+    $selectCountriesButton.Add_Click({
+        # Get current countries from textbox
+        $currentCountries = @()
+        if (-not [string]::IsNullOrWhiteSpace($countriesTextBox.Text)) {
+            $currentCountries = $countriesTextBox.Text.Split(',') | ForEach-Object { $_.Trim().ToUpper() }
+        }
+        
+        # Open country selection dialog
+        $selectedCountries = Show-CountrySelectionDialog -PreselectedCountries $currentCountries
+        
+        if ($selectedCountries) {
+            $countriesTextBox.Text = ($selectedCountries -join ', ')
+        }
+    })
+    $form.Controls.Add($selectCountriesButton)
+
+    # Help text for country selection
+    $helpLabel = New-Object System.Windows.Forms.Label
+    $helpLabel.Text = "Click 'Select Countries' to choose from a list of all countries"
+    $helpLabel.Location = New-Object System.Drawing.Point(10, 110)
+    $helpLabel.Size = New-Object System.Drawing.Size(460, 15)
+    $helpLabel.ForeColor = [System.Drawing.Color]::Gray
+    $helpLabel.Font = New-Object System.Drawing.Font($helpLabel.Font.FontFamily, 8)
+    $form.Controls.Add($helpLabel)
 
     # Include Unknown
     $includeUnknownCheckBox = New-Object System.Windows.Forms.CheckBox
     $includeUnknownCheckBox.Text = "Include unknown/future countries"
-    $includeUnknownCheckBox.Location = New-Object System.Drawing.Point(10, 120)
+    $includeUnknownCheckBox.Location = New-Object System.Drawing.Point(10, 135)
     $includeUnknownCheckBox.Size = New-Object System.Drawing.Size(250, 20)
     $form.Controls.Add($includeUnknownCheckBox)
 
@@ -815,7 +925,7 @@ function Show-CountryLocationDialog {
     # Buttons
     $actionButton = New-Object System.Windows.Forms.Button
     $actionButton.Text = $Mode
-    $actionButton.Location = New-Object System.Drawing.Point(310, 160)
+    $actionButton.Location = New-Object System.Drawing.Point(310, 215)
     $actionButton.Size = New-Object System.Drawing.Size(75, 23)
     $actionButton.Add_Click({
         if ([string]::IsNullOrWhiteSpace($nameTextBox.Text)) {
@@ -823,7 +933,7 @@ function Show-CountryLocationDialog {
             return
         }
         if ([string]::IsNullOrWhiteSpace($countriesTextBox.Text)) {
-            [System.Windows.Forms.MessageBox]::Show("Please enter country codes.", "Validation Error")
+            [System.Windows.Forms.MessageBox]::Show("Please select at least one country.", "Validation Error")
             return
         }
 
@@ -893,7 +1003,7 @@ function Show-CountryLocationDialog {
 
     $cancelButton = New-Object System.Windows.Forms.Button
     $cancelButton.Text = "Cancel"
-    $cancelButton.Location = New-Object System.Drawing.Point(395, 160)
+    $cancelButton.Location = New-Object System.Drawing.Point(395, 215)
     $cancelButton.Size = New-Object System.Drawing.Size(75, 23)
     $cancelButton.Add_Click({ $form.Close() })
     $form.Controls.Add($cancelButton)
@@ -963,11 +1073,7 @@ function Copy-SelectedNamedLocation {
     $promptMessage = "Enter a name for the new Named Location:`n`nThis will copy the country codes (" + ($sourceCountries -join ', ') + ") and settings from '" + $location.DisplayName + "'"
     $defaultName = "Copy of " + $location.DisplayName
     
-    $newName = [Microsoft.VisualBasic.Interaction]::InputBox(
-        $promptMessage,
-        "Copy Named Location",
-        $defaultName
-    )
+    $newName = Show-InputBox -Prompt $promptMessage -Title "Copy Named Location" -DefaultValue $defaultName
     
     if ([string]::IsNullOrWhiteSpace($newName)) {
         return
@@ -1051,7 +1157,7 @@ function Rename-SelectedNamedLocation {
     $currentName = $selectedItem.Text
     $locationId = $selectedItem.SubItems[1].Text
 
-    $newName = [Microsoft.VisualBasic.Interaction]::InputBox("Enter new display name:", "Rename Named Location", $currentName)
+    $newName = Show-InputBox -Prompt "Enter new display name:" -Title "Rename Named Location" -DefaultValue $currentName
     
     if ([string]::IsNullOrWhiteSpace($newName) -or $newName -eq $currentName) {
         return
@@ -1290,11 +1396,7 @@ function Copy-SelectedPolicy {
     $promptMessage = "Enter a name for the new Conditional Access Policy:`n`nThis will copy all settings from '$sourceName'"
     $defaultName = "Copy of $sourceName"
     
-    $newName = [Microsoft.VisualBasic.Interaction]::InputBox(
-        $promptMessage,
-        "Copy Conditional Access Policy",
-        $defaultName
-    )
+    $newName = Show-InputBox -Prompt $promptMessage -Title "Copy Conditional Access Policy" -DefaultValue $defaultName
     
     if ([string]::IsNullOrWhiteSpace($newName)) {
         return
@@ -1643,7 +1745,7 @@ function Rename-SelectedPolicy {
     $policy = $selectedItem.Tag
     $policyId = $policy.Id
 
-    $newName = [Microsoft.VisualBasic.Interaction]::InputBox("Enter new display name:", "Rename Conditional Access Policy", $currentName)
+    $newName = Show-InputBox -Prompt "Enter new display name:" -Title "Rename Conditional Access Policy" -DefaultValue $currentName
     
     if ([string]::IsNullOrWhiteSpace($newName) -or $newName -eq $currentName) {
         return
