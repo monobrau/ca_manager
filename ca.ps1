@@ -7,43 +7,30 @@
     Requirements: Windows PowerShell 5.1 with Microsoft.Graph module
 #>
 
-# Check PowerShell version first (before loading anything)
+# Check PowerShell version and compatibility
 if ($PSVersionTable.PSEdition -eq "Core") {
-    Write-Warning "You are running PowerShell Core. This script requires Windows PowerShell 5.1"
-    Write-Host "Please run this script in Windows PowerShell (powershell.exe, not pwsh.exe)" -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
-    exit
-}
-
-# Load assemblies and configure immediately (must be done before ANY Windows Forms objects are created)
-try {
-    Write-Host "Loading Windows Forms assemblies..." -ForegroundColor Green
-    
-    # Load assemblies first
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing  
-    Add-Type -AssemblyName Microsoft.VisualBasic
-    
-    Write-Host "Configuring Windows Forms rendering..." -ForegroundColor Green
-    
-    # Try to configure rendering - if it fails, continue anyway
+    # PowerShell Core (pwsh) compatibility handling
     try {
-        [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
-        [System.Windows.Forms.Application]::EnableVisualStyles()
-        Write-Host "Windows Forms configured with visual styles." -ForegroundColor Green
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction SilentlyContinue
     } catch {
-        Write-Warning "Could not set text rendering default (forms may already exist). Continuing..."
-        [System.Windows.Forms.Application]::EnableVisualStyles()
-        Write-Host "Windows Forms configured (basic mode)." -ForegroundColor Green
+        Write-Warning "Windows Forms or VisualBasic assemblies could not be loaded. GUI may not work in pwsh on non-Windows platforms."
     }
-    
-    Write-Host "Windows Forms initialized successfully." -ForegroundColor Green
-} catch {
-    Write-Error "Failed to initialize Windows Forms: $_"
-    Write-Host "This error can occur if Windows Forms objects were already created." -ForegroundColor Yellow
-    Write-Host "Try restarting PowerShell and running the script again." -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
-    exit
+    Write-Host "Running in PowerShell Core (pwsh). Some GUI features may not be fully supported on non-Windows systems." -ForegroundColor Yellow
+} else {
+    # Windows PowerShell (classic)
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        Add-Type -AssemblyName Microsoft.VisualBasic
+    } catch {
+        Write-Error "Failed to initialize Windows Forms: $_"
+        Write-Host "This error can occur if Windows Forms objects were already created." -ForegroundColor Yellow
+        Write-Host "Try restarting PowerShell and running the script again." -ForegroundColor Yellow
+        Read-Host "Press Enter to exit"
+        exit
+    }
 }
 
 # Check for Microsoft Graph module
@@ -136,7 +123,7 @@ function Disconnect-GraphAPI {
 
 function Show-ReconnectDialog {
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Reconnect to Tenant"
+    $form.Text = "Connect to Tenant (will prompt for credentials)"
     $form.Size = New-Object System.Drawing.Size(400, 200)
     $form.StartPosition = "CenterParent"
     $form.FormBorderStyle = "FixedDialog"
@@ -400,16 +387,16 @@ function Show-CountryLocationDialog {
     # Pre-populate if editing
     if ($ExistingLocation -and $Mode -eq "Edit") {
         $nameTextBox.Text = $ExistingLocation.DisplayName
-        
         $countries = $ExistingLocation.AdditionalProperties['countriesAndRegions']
         if ($countries) {
             $countriesTextBox.Text = ($countries -join ', ')
         }
-        
         $includeUnknown = $ExistingLocation.AdditionalProperties['includeUnknownCountriesAndRegions']
         if ($includeUnknown) {
             $includeUnknownCheckBox.Checked = $includeUnknown
         }
+        # Allow editing, but track original countries for comparison
+        $countriesTextBox.Tag = $countries -join ','
     }
 
     # Buttons
@@ -426,37 +413,147 @@ function Show-CountryLocationDialog {
             [System.Windows.Forms.MessageBox]::Show("Please enter country codes.", "Validation Error")
             return
         }
+        $countryCodes = $countriesTextBox.Text.Split(',') | ForEach-Object { [string]$_.Trim().ToUpper() }
+        $countryCodes = $countryCodes | Where-Object { $_ -ne "" }
+        $invalidCodes = $countryCodes | Where-Object { $_ -notmatch '^[A-Z]{2}$' }
+        if ($invalidCodes.Count -gt 0) {
+            [System.Windows.Forms.MessageBox]::Show("Invalid country code(s): " + ($invalidCodes -join ', ') + "`n`nPlease enter only valid 2-letter country codes (e.g., US, CA, GB).", "Invalid Country Codes")
+            return
+        }
+        if ($countryCodes.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Please enter at least one valid 2-letter country code.", "Validation Error")
+            return
+        }
+        $countryCodes = @($countryCodes | ForEach-Object { [string]$_ })
+        $countryCodes = [string[]]$countryCodes
+        $success = $false
+        if ($Mode -eq "Edit") {
+            # Compare original and new countries
+            $originalCountries = @()
+            if ($countriesTextBox.Tag) { $originalCountries = $countriesTextBox.Tag.Split(',') | ForEach-Object { [string]$_.Trim().ToUpper() } }
+            $originalCountries = $originalCountries | Where-Object { $_ -ne "" }
+            $originalCountries = @($originalCountries | ForEach-Object { [string]$_ })
+            $originalCountries = [string[]]$originalCountries
+            $countriesChanged = ($originalCountries.Count -ne $countryCodes.Count) -or ($null -ne (Compare-Object $originalCountries $countryCodes -SyncWindow 0))
+            if ($countriesChanged) {
+                $msg = "Microsoft Graph does not allow changing the countries of an existing country named location.\n\n" +
+                       "This operation will DELETE the existing location and create a new one with the new countries.\n\n" +
+                       "Any Conditional Access policies referencing the old location will need to be updated to use the new one (ID will change).\n\n" +
+                       "Proceed?"
+                $result = [System.Windows.Forms.MessageBox]::Show($msg, "Recreate Named Location", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                if ($result -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+                try {
+                    # Delete old location
+                    $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
+                    Write-Host "DELETE URI: $uri" -ForegroundColor Yellow
+                    Invoke-MgGraphRequest -Method DELETE -Uri $uri
+                    # Create new location
+                    $createParams = @{
+                        "@odata.type" = "#microsoft.graph.countryNamedLocation"
+                        displayName = $nameTextBox.Text
+                        countriesAndRegions = $countryCodes
+                        includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
+                    }
+                    $jsonBody = $createParams | ConvertTo-Json -Depth 10
+                    Write-Host "POST URI: https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations" -ForegroundColor Yellow
+                    Write-Host "POST BODY: $jsonBody" -ForegroundColor Yellow
+                    $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
+                    try {
+                        $response = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $jsonBody -ContentType "application/json"
+                    } catch {
+                        Write-Host "POST ERROR: $($_.Exception.Message)" -ForegroundColor Red
+                        Write-Host "POST ERROR DETAILS: $($_ | Out-String)" -ForegroundColor Red
+                        [System.Windows.Forms.MessageBox]::Show("Error deleting/recreating Named Location (POST): `n$($_.Exception.Message)`n`n$($_ | Out-String)", "Error")
+                        return
+                    }
+                    [System.Windows.Forms.MessageBox]::Show("Named Location deleted and recreated successfully!\n\nRemember to update any Conditional Access policies that referenced the old location.", "Success")
+                    $success = $true
+                    $form.Close()
+                    Start-Sleep -Seconds 1
+                    Refresh-NamedLocationsList $listView
+                    return
+                } catch {
+                    Write-Host "DELETE/RECREATE ERROR: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "DELETE/RECREATE ERROR DETAILS: $($_ | Out-String)" -ForegroundColor Red
+                    [System.Windows.Forms.MessageBox]::Show("Error deleting/recreating Named Location: `n$($_.Exception.Message)`n`n$($_ | Out-String)", "Error")
+                    return
+                }
+            } else {
+                # Only PATCH changed fields (displayName, includeUnknownCountriesAndRegions)
+                $updateBody = @{}
+                if ($nameTextBox.Text -ne $ExistingLocation.DisplayName) {
+                    $updateBody["displayName"] = $nameTextBox.Text
+                }
+                $existingUnknown = $ExistingLocation.AdditionalProperties['includeUnknownCountriesAndRegions']
+                if ($includeUnknownCheckBox.Checked -ne $existingUnknown) {
+                    $updateBody["includeUnknownCountriesAndRegions"] = $includeUnknownCheckBox.Checked
+                }
+                if ($updateBody.Count -eq 0) {
+                    [System.Windows.Forms.MessageBox]::Show("No changes to update.", "No Changes")
+                    return
+                }
+                Write-Host "PATCH URI: https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/$($ExistingLocation.Id)" -ForegroundColor Yellow
+                Write-Host "PATCH BODY: $($updateBody | ConvertTo-Json -Depth 10)" -ForegroundColor Yellow
+                try {
+                    $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
+                    $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $updateBody -ContentType "application/json"
+                } catch {
+                    Write-Host "PATCH ERROR: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "PATCH ERROR DETAILS: $($_ | Out-String)" -ForegroundColor Red
+                    [System.Windows.Forms.MessageBox]::Show("Error updating Named Location (PATCH): `n$($_.Exception.Message)`n`n$($_ | Out-String)", "Error")
+                    return
+                }
+                [System.Windows.Forms.MessageBox]::Show("Named Location updated successfully!", "Success")
+                $success = $true
+                $form.Close()
+                Start-Sleep -Seconds 1
+                Refresh-NamedLocationsList $listView
+                return
+            }
+        }
 
         try {
-            $countryCodes = $countriesTextBox.Text.Split(',') | ForEach-Object { $_.Trim().ToUpper() }
+            $countryCodes = $countriesTextBox.Text.Split(',') | ForEach-Object { [string]$_.Trim().ToUpper() }
+            # Remove empty entries
+            $countryCodes = $countryCodes | Where-Object { $_ -ne "" }
+            # Validate: must be exactly 2 uppercase letters
+            $invalidCodes = $countryCodes | Where-Object { $_ -notmatch '^[A-Z]{2}$' }
+            if ($invalidCodes.Count -gt 0) {
+                [System.Windows.Forms.MessageBox]::Show("Invalid country code(s): " + ($invalidCodes -join ', ') + "`n`nPlease enter only valid 2-letter country codes (e.g., US, CA, GB).", "Invalid Country Codes")
+                return
+            }
+            if ($countryCodes.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Please enter at least one valid 2-letter country code.", "Validation Error")
+                return
+            }
+            # Ensure $countryCodes is always a .NET string array
+            $countryCodes = @($countryCodes | ForEach-Object { [string]$_ })
+            $countryCodes = [string[]]$countryCodes
             $success = $false
             
             if ($Mode -eq "Edit") {
-                # Update existing location using PATCH
+                # PATCH: Do NOT include @odata.type
                 $updateBody = @{
                     displayName = $nameTextBox.Text
                     countriesAndRegions = $countryCodes
                     includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
-                } | ConvertTo-Json -Depth 10
-                
-                Write-Host ("Updating location " + $ExistingLocation.Id + " with: " + $updateBody) -ForegroundColor Cyan
+                }
+                Write-Host ("Updating location " + $ExistingLocation.Id + " with: " + ($updateBody | ConvertTo-Json -Depth 10)) -ForegroundColor Cyan
                 $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
                 $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $updateBody -ContentType "application/json"
                 Write-Host ("Update response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
                 $success = $true
                 [System.Windows.Forms.MessageBox]::Show("Named Location updated successfully!", "Success")
             } else {
-                # Create new location using REST API
+                # POST: Include @odata.type
                 $createParams = @{
-                    "odata.type" = "#microsoft.graph.countryNamedLocation"
+                    "@odata.type" = "#microsoft.graph.countryNamedLocation"
                     displayName = $nameTextBox.Text
                     countriesAndRegions = $countryCodes
                     includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
                 }
-                
                 $jsonBody = $createParams | ConvertTo-Json -Depth 10
                 Write-Host ("Creating location with: " + $jsonBody) -ForegroundColor Cyan
-                
                 $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
                 $response = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $jsonBody -ContentType "application/json"
                 Write-Host ("Create response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
@@ -577,20 +674,16 @@ function Copy-SelectedNamedLocation {
         # Try the PowerShell cmdlet approach first (often more reliable)
         try {
             Write-Host "Attempting copy with PowerShell cmdlet..." -ForegroundColor Yellow
-            
             $params = @{
                 "@odata.type" = "#microsoft.graph.countryNamedLocation"
-                DisplayName = $newName
-                CountriesAndRegions = $sourceCountries
-                IncludeUnknownCountriesAndRegions = $sourceIncludeUnknown
+                displayName = $newName
+                countriesAndRegions = $sourceCountries
+                includeUnknownCountriesAndRegions = $sourceIncludeUnknown
             }
-            
             Write-Host ("PowerShell params: " + ($params | ConvertTo-Json)) -ForegroundColor Cyan
             New-MgIdentityConditionalAccessNamedLocation -BodyParameter $params
-            
             Write-Host "PowerShell cmdlet copy successful!" -ForegroundColor Green
             [System.Windows.Forms.MessageBox]::Show("Named Location copied successfully as '" + $newName + "'!", "Success")
-            
             # Small delay to allow Microsoft Graph to process the new location
             Start-Sleep -Seconds 1
             Refresh-NamedLocationsList $listView
@@ -599,7 +692,6 @@ function Copy-SelectedNamedLocation {
             Write-Host ("PowerShell cmdlet failed: " + $_.Exception.Message) -ForegroundColor Red
             Write-Host "Trying REST API approach..." -ForegroundColor Yellow
         }
-        
         # Fallback to REST API with cleaned data
         $createParams = @{
             "@odata.type" = "#microsoft.graph.countryNamedLocation"
@@ -607,16 +699,12 @@ function Copy-SelectedNamedLocation {
             countriesAndRegions = $sourceCountries
             includeUnknownCountriesAndRegions = [bool]$sourceIncludeUnknown
         }
-        
         $jsonBody = $createParams | ConvertTo-Json -Depth 10
         Write-Host ("Creating copy with REST API: " + $jsonBody) -ForegroundColor Cyan
-        
         $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
         $response = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $jsonBody -ContentType "application/json"
-        
         Write-Host ("REST API copy successful: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
         [System.Windows.Forms.MessageBox]::Show("Named Location copied successfully as '" + $newName + "'!", "Success")
-        
         # Small delay to allow Microsoft Graph to process the new location
         Start-Sleep -Seconds 1
         Refresh-NamedLocationsList $listView
@@ -628,7 +716,6 @@ function Copy-SelectedNamedLocation {
         $errorMessage += "Countries: " + ($sourceCountries -join ', ') + "`n"
         $errorMessage += "Include Unknown: " + $sourceIncludeUnknown + "`n`n"
         $errorMessage += "Try using a simpler name without special characters."
-        
         Write-Host ("Copy error: " + $errorMessage) -ForegroundColor Red
         [System.Windows.Forms.MessageBox]::Show($errorMessage, "Copy Error")
     }
@@ -1327,47 +1414,25 @@ function Show-ManageUserExceptionsDialog {
     $addButton.Location = New-Object System.Drawing.Point(470, 235)
     $addButton.Size = New-Object System.Drawing.Size(100, 30)
     $addButton.Add_Click({
-        $userInputs = $addTextBox.Text.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-        if ($userInputs.Count -eq 0) {
-            [System.Windows.Forms.MessageBox]::Show("Please enter users to add.", "Input Required")
-            return
-        }
-
+        $pickedUsers = Show-UserPickerDialog -Title "Select Users to Exclude"
+        if (-not $pickedUsers -or $pickedUsers.Count -eq 0) { return }
         try {
-            $resolveResult = Resolve-UserInput -UserInputs $userInputs
-            
-            if ($resolveResult.NotFoundUsers.Count -gt 0) {
-                $notFoundMessage = "Some users not found: " + ($resolveResult.NotFoundUsers -join ", ") + ". Continue?"
-                $result = [System.Windows.Forms.MessageBox]::Show($notFoundMessage, "Users Not Found", [System.Windows.Forms.MessageBoxButtons]::YesNo)
-                if ($result -eq [System.Windows.Forms.DialogResult]::No) {
-                    return
+            $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
+            $currentExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+            $newExcludeList = @()
+            if ($currentExcludeUsers) { $newExcludeList += $currentExcludeUsers }
+            foreach ($user in $pickedUsers) {
+                if ($user.Id -notin $newExcludeList) {
+                    $newExcludeList += $user.Id
                 }
             }
-
-            if ($resolveResult.ResolvedUserIds.Count -gt 0) {
-                $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
-                $currentExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
-                $newExcludeList = @()
-                
-                if ($currentExcludeUsers) { $newExcludeList += $currentExcludeUsers }
-                
-                foreach ($userId in $resolveResult.ResolvedUserIds) {
-                    if ($userId -notin $newExcludeList) {
-                        $newExcludeList += $userId
-                    }
-                }
-                
-                $userConditions = @{
-                    IncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
-                    ExcludeUsers = $newExcludeList
-                }
-                
-                Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
-                
-                [System.Windows.Forms.MessageBox]::Show("Users added successfully!", "Success")
-                $addTextBox.Clear()
-                Refresh-ExcludedUsers
+            $userConditions = @{
+                IncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+                ExcludeUsers = $newExcludeList
             }
+            Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
+            [System.Windows.Forms.MessageBox]::Show("Users added successfully!", "Success")
+            Refresh-ExcludedUsers
         } catch {
             [System.Windows.Forms.MessageBox]::Show("Error adding users: $_", "Error")
         }
@@ -1520,50 +1585,25 @@ function Show-ManageIncludedUsersDialog {
     $addButton.Location = New-Object System.Drawing.Point(470, 265)
     $addButton.Size = New-Object System.Drawing.Size(100, 30)
     $addButton.Add_Click({
-        $userInputs = $addTextBox.Text.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-        if ($userInputs.Count -eq 0) {
-            [System.Windows.Forms.MessageBox]::Show("Please enter users to add.", "Input Required")
-            return
-        }
-
+        $pickedUsers = Show-UserPickerDialog -Title "Select Users to Include"
+        if (-not $pickedUsers -or $pickedUsers.Count -eq 0) { return }
         try {
-            $resolveResult = Resolve-UserInput -UserInputs $userInputs
-            
-            if ($resolveResult.NotFoundUsers.Count -gt 0) {
-                $notFoundMessage = "Some users not found: " + ($resolveResult.NotFoundUsers -join ", ") + ". Continue?"
-                $result = [System.Windows.Forms.MessageBox]::Show($notFoundMessage, "Users Not Found", [System.Windows.Forms.MessageBoxButtons]::YesNo)
-                if ($result -eq [System.Windows.Forms.DialogResult]::No) {
-                    return
+            $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
+            $currentIncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+            $newIncludeList = @()
+            if ($currentIncludeUsers) { $newIncludeList += ($currentIncludeUsers | Where-Object { $_ -ne "All" }) }
+            foreach ($user in $pickedUsers) {
+                if ($user.Id -notin $newIncludeList) {
+                    $newIncludeList += $user.Id
                 }
             }
-
-            if ($resolveResult.ResolvedUserIds.Count -gt 0) {
-                $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
-                $currentIncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
-                $newIncludeList = @()
-                
-                # Don't include "All" in the specific user list
-                if ($currentIncludeUsers) { 
-                    $newIncludeList += ($currentIncludeUsers | Where-Object { $_ -ne "All" })
-                }
-                
-                foreach ($userId in $resolveResult.ResolvedUserIds) {
-                    if ($userId -notin $newIncludeList) {
-                        $newIncludeList += $userId
-                    }
-                }
-                
-                $userConditions = @{
-                    IncludeUsers = $newIncludeList
-                    ExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
-                }
-                
-                Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
-                
-                [System.Windows.Forms.MessageBox]::Show("Users added successfully!", "Success")
-                $addTextBox.Clear()
-                Refresh-IncludedUsers
+            $userConditions = @{
+                IncludeUsers = $newIncludeList
+                ExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
             }
+            Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
+            [System.Windows.Forms.MessageBox]::Show("Users added successfully!", "Success")
+            Refresh-IncludedUsers
         } catch {
             [System.Windows.Forms.MessageBox]::Show("Error adding users: $_", "Error")
         }
@@ -1715,14 +1755,14 @@ function Create-MainForm {
     # Connection Buttons Panel
     $connectionPanel = New-Object System.Windows.Forms.Panel
     $connectionPanel.Location = New-Object System.Drawing.Point(10, 10)
-    $connectionPanel.Size = New-Object System.Drawing.Size(970, 35)
+    $connectionPanel.Size = New-Object System.Drawing.Size(970, 40)
     $form.Controls.Add($connectionPanel)
 
     # Connect Button
     $script:connectButton = New-Object System.Windows.Forms.Button
     $script:connectButton.Text = "Connect to Microsoft Graph"
-    $script:connectButton.Location = New-Object System.Drawing.Point(0, 0)
-    $script:connectButton.Size = New-Object System.Drawing.Size(180, 30)
+    $script:connectButton.Location = New-Object System.Drawing.Point(10, 5)
+    $script:connectButton.Size = New-Object System.Drawing.Size(200, 30)
     $script:connectButton.Add_Click({
         if (Connect-GraphAPI) {
             # Refresh both lists directly
@@ -1736,10 +1776,29 @@ function Create-MainForm {
 
     # Reconnect Button
     $script:reconnectButton = New-Object System.Windows.Forms.Button
-    $script:reconnectButton.Text = "Reconnect/Change Tenant"
-    $script:reconnectButton.Location = New-Object System.Drawing.Point(190, 0)
-    $script:reconnectButton.Size = New-Object System.Drawing.Size(160, 30)
+    $script:reconnectButton.Text = "Disconnect/Connect to New Tenant"
+    $script:reconnectButton.Location = New-Object System.Drawing.Point(220, 5)
+    $script:reconnectButton.Size = New-Object System.Drawing.Size(240, 30)
     $script:reconnectButton.Add_Click({
+        # Log off all relevant modules before reconnecting
+        try {
+            if (Get-Module -ListAvailable -Name Microsoft.Graph) {
+                Disconnect-MgGraph -ErrorAction SilentlyContinue
+                Remove-Module Microsoft.Graph -ErrorAction SilentlyContinue
+            }
+            if (Get-Module -ListAvailable -Name AzureAD) {
+                Disconnect-AzureAD -ErrorAction SilentlyContinue
+                Remove-Module AzureAD -ErrorAction SilentlyContinue
+            }
+            if (Get-Module -ListAvailable -Name MSOnline) {
+                Set-MsolUser -UserPrincipalName "dummy@dummy.com" -BlockCredential $false -ErrorAction SilentlyContinue # Dummy call to load module
+                Remove-Module MSOnline -ErrorAction SilentlyContinue
+            }
+        } catch {}
+        $global:isConnected = $false
+        $global:tenantId = ""
+        $global:tenantDisplayName = ""
+        Update-ConnectionUI
         Show-ReconnectDialog
     })
     $connectionPanel.Controls.Add($script:reconnectButton)
@@ -1747,8 +1806,8 @@ function Create-MainForm {
     # Disconnect Button
     $script:disconnectButton = New-Object System.Windows.Forms.Button
     $script:disconnectButton.Text = "Disconnect"
-    $script:disconnectButton.Location = New-Object System.Drawing.Point(360, 0)
-    $script:disconnectButton.Size = New-Object System.Drawing.Size(100, 30)
+    $script:disconnectButton.Location = New-Object System.Drawing.Point(470, 5)
+    $script:disconnectButton.Size = New-Object System.Drawing.Size(120, 30)
     $script:disconnectButton.Add_Click({
         Disconnect-GraphAPI
     })
@@ -1757,8 +1816,8 @@ function Create-MainForm {
     # Status Label
     $script:statusLabel = New-Object System.Windows.Forms.Label
     $script:statusLabel.Text = "Not connected"
-    $script:statusLabel.Location = New-Object System.Drawing.Point(470, 5)
-    $script:statusLabel.Size = New-Object System.Drawing.Size(500, 20)
+    $script:statusLabel.Location = New-Object System.Drawing.Point(600, 10)
+    $script:statusLabel.Size = New-Object System.Drawing.Size(350, 20)
     $script:statusLabel.ForeColor = [System.Drawing.Color]::Red
     $connectionPanel.Controls.Add($script:statusLabel)
 
@@ -1915,6 +1974,15 @@ function Create-MainForm {
     })
     $policiesTab.Controls.Add($polDeleteButton)
 
+    $polEditLocationsButton = New-Object System.Windows.Forms.Button
+    $polEditLocationsButton.Text = "Edit Named Locations"
+    $polEditLocationsButton.Location = New-Object System.Drawing.Point(740, 15)
+    $polEditLocationsButton.Size = New-Object System.Drawing.Size(130, 25)
+    $polEditLocationsButton.Add_Click({
+        Show-EditPolicyLocationsDialog $script:policiesListView
+    })
+    $policiesTab.Controls.Add($polEditLocationsButton)
+
     # Initialize UI state
     Update-ConnectionUI
 
@@ -1938,4 +2006,251 @@ try {
 } catch {
     Write-Error "Error: $($_.Exception.Message)"
     Read-Host "Press Enter to exit"
+}
+
+function Show-EditPolicyLocationsDialog {
+    param($listView)
+    if (-not $global:isConnected) {
+        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
+        return
+    }
+    if ($listView.SelectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Please select a Conditional Access Policy.", "No Selection")
+        return
+    }
+    $selectedItem = $listView.SelectedItems[0]
+    $policy = $selectedItem.Tag
+    $policyId = $policy.Id
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Edit Named Locations - " + $policy.DisplayName
+    $form.Size = New-Object System.Drawing.Size(700, 600)
+    $form.StartPosition = "CenterParent"
+    # Get all named locations
+    try {
+        $allLocations = Get-MgIdentityConditionalAccessNamedLocation -All
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Error loading named locations: $_", "Error")
+        return
+    }
+    # Get current include/exclude
+    $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
+    $includeLocations = $currentPolicy.Conditions.Locations.IncludeLocations
+    $excludeLocations = $currentPolicy.Conditions.Locations.ExcludeLocations
+    # ListView for all named locations
+    $locationsListView = New-Object System.Windows.Forms.ListView
+    $locationsListView.Location = New-Object System.Drawing.Point(10, 40)
+    $locationsListView.Size = New-Object System.Drawing.Size(660, 400)
+    $locationsListView.View = "Details"
+    $locationsListView.FullRowSelect = $true
+    $locationsListView.CheckBoxes = $true
+    $locationsListView.Columns.Add("Display Name", 250) | Out-Null
+    $locationsListView.Columns.Add("ID", 350) | Out-Null
+    $locationsListView.Columns.Add("Include", 30) | Out-Null
+    $locationsListView.Columns.Add("Exclude", 30) | Out-Null
+    $form.Controls.Add($locationsListView)
+    # Populate ListView
+    foreach ($loc in $allLocations) {
+        $item = New-Object System.Windows.Forms.ListViewItem($loc.DisplayName)
+        $item.SubItems.Add($loc.Id) | Out-Null
+        $item.SubItems.Add("") | Out-Null
+        $item.SubItems.Add("") | Out-Null
+        $item.Tag = $loc
+        $locationsListView.Items.Add($item) | Out-Null
+    }
+    # Add checkboxes for include/exclude
+    foreach ($item in $locationsListView.Items) {
+        $locId = $item.SubItems[1].Text
+        if ($includeLocations -and $includeLocations -contains $locId) {
+            $item.Checked = $true
+            $item.SubItems[2].Text = "✔"
+        }
+        if ($excludeLocations -and $excludeLocations -contains $locId) {
+            $item.SubItems[3].Text = "✔"
+        }
+    }
+    # Instructions
+    $instructions = New-Object System.Windows.Forms.Label
+    $instructions.Text = "Check to include. Right-click to toggle exclude."
+    $instructions.Location = New-Object System.Drawing.Point(10, 10)
+    $instructions.Size = New-Object System.Drawing.Size(600, 20)
+    $form.Controls.Add($instructions)
+    # Right-click to toggle exclude
+    $locationsListView.Add_MouseClick({
+        param($sender, $e)
+        if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+            $hit = $locationsListView.HitTest($e.Location)
+            if ($hit.Item) {
+                $idx = $hit.Item.Index
+                $item = $locationsListView.Items[$idx]
+                if ($item.SubItems[3].Text -eq "✔") {
+                    $item.SubItems[3].Text = ""
+                } else {
+                    $item.SubItems[3].Text = "✔"
+                }
+            }
+        }
+    })
+    # Save button
+    $saveButton = New-Object System.Windows.Forms.Button
+    $saveButton.Text = "Save"
+    $saveButton.Location = New-Object System.Drawing.Point(590, 500)
+    $saveButton.Size = New-Object System.Drawing.Size(80, 30)
+    $saveButton.Add_Click({
+        $newInclude = @()
+        $newExclude = @()
+        foreach ($item in $locationsListView.Items) {
+            $locId = $item.SubItems[1].Text
+            if ($item.Checked) { $newInclude += $locId }
+            if ($item.SubItems[3].Text -eq "✔") { $newExclude += $locId }
+        }
+        $locationsObj = @{}
+        if ($newInclude.Count -gt 0) { $locationsObj["includeLocations"] = $newInclude }
+        if ($newExclude.Count -gt 0) { $locationsObj["excludeLocations"] = $newExclude }
+        $patchBody = @{ conditions = @{ locations = $locationsObj } }
+        try {
+            Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions $patchBody.conditions
+            [System.Windows.Forms.MessageBox]::Show("Policy updated successfully!", "Success")
+            $form.Close()
+            Refresh-PoliciesList $listView
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Error updating policy: $_", "Error")
+        }
+    })
+    $form.Controls.Add($saveButton)
+    # Cancel button
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(500, 500)
+    $cancelButton.Size = New-Object System.Drawing.Size(80, 30)
+    $cancelButton.Add_Click({ $form.Close() })
+    $form.Controls.Add($cancelButton)
+    $form.ShowDialog() | Out-Null
+}
+
+function Show-UserPickerDialog {
+    param(
+        [string]$Title = "Select Users",
+        [int]$MaxSelect = 0  # 0 = unlimited
+    )
+    if (-not $global:isConnected) {
+        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
+        return $null
+    }
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $Title
+    $form.Size = New-Object System.Drawing.Size(700, 600)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+
+    $searchLabel = New-Object System.Windows.Forms.Label
+    $searchLabel.Text = "Search:"
+    $searchLabel.Location = New-Object System.Drawing.Point(10, 10)
+    $searchLabel.Size = New-Object System.Drawing.Size(50, 20)
+    $form.Controls.Add($searchLabel)
+
+    $searchBox = New-Object System.Windows.Forms.TextBox
+    $searchBox.Location = New-Object System.Drawing.Point(65, 8)
+    $searchBox.Size = New-Object System.Drawing.Size(400, 20)
+    $form.Controls.Add($searchBox)
+
+    $listView = New-Object System.Windows.Forms.ListView
+    $listView.Location = New-Object System.Drawing.Point(10, 40)
+    $listView.Size = New-Object System.Drawing.Size(660, 460)
+    $listView.View = "Details"
+    $listView.FullRowSelect = $true
+    $listView.MultiSelect = $true
+    $listView.CheckBoxes = $false
+    $listView.Columns.Add("Display Name", 250) | Out-Null
+    $listView.Columns.Add("UserPrincipalName", 300) | Out-Null
+    $listView.Columns.Add("Id", 100) | Out-Null
+    $form.Controls.Add($listView)
+
+    $statusLabel = New-Object System.Windows.Forms.Label
+    $statusLabel.Text = "Loading users..."
+    $statusLabel.Location = New-Object System.Drawing.Point(10, 510)
+    $statusLabel.Size = New-Object System.Drawing.Size(600, 20)
+    $form.Controls.Add($statusLabel)
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "Add Selected"
+    $okButton.Location = New-Object System.Drawing.Point(500, 540)
+    $okButton.Size = New-Object System.Drawing.Size(80, 30)
+    $okButton.Enabled = $false
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(600, 540)
+    $cancelButton.Size = New-Object System.Drawing.Size(80, 30)
+    $cancelButton.Add_Click({ $form.Close() })
+    $form.Controls.Add($cancelButton)
+
+    $selectedUsers = @()
+    $allUsers = @()
+    $filteredUsers = @()
+
+    $okButton.Add_Click({
+        $selectedUsers = @()
+        foreach ($item in $listView.SelectedItems) {
+            $selectedUsers += $item.Tag
+        }
+        $form.Close()
+    })
+
+    $searchBox.Add_TextChanged({
+        $query = $searchBox.Text.Trim().ToLower()
+        $listView.Items.Clear()
+        if ([string]::IsNullOrWhiteSpace($query)) {
+            foreach ($user in $allUsers) {
+                $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+                $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+                $item.SubItems.Add($user.Id) | Out-Null
+                $item.Tag = $user
+                $listView.Items.Add($item) | Out-Null
+            }
+        } else {
+            foreach ($user in $allUsers | Where-Object { $_.DisplayName -like "*$query*" -or $_.UserPrincipalName -like "*$query*" }) {
+                $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+                $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+                $item.SubItems.Add($user.Id) | Out-Null
+                $item.Tag = $user
+                $listView.Items.Add($item) | Out-Null
+            }
+        }
+    })
+
+    $listView.Add_SelectedIndexChanged({
+        $okButton.Enabled = $listView.SelectedItems.Count -gt 0
+        if ($MaxSelect -gt 0 -and $listView.SelectedItems.Count -gt $MaxSelect) {
+            [System.Windows.Forms.MessageBox]::Show("You can select up to $MaxSelect users.", "Selection Limit")
+            # Deselect extras
+            for ($i = $MaxSelect; $i -lt $listView.SelectedItems.Count; $i++) {
+                $listView.SelectedItems[$i].Selected = $false
+            }
+        }
+    })
+
+    # Load users in background
+    $job = Start-Job -ScriptBlock {
+        Import-Module Microsoft.Graph.Users
+        Get-MgUser -All | Select-Object DisplayName,UserPrincipalName,Id
+    }
+    while (-not $job.HasExited) {
+        Start-Sleep -Milliseconds 200
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    $allUsers = Receive-Job $job
+    Remove-Job $job
+    $statusLabel.Text = "Loaded $($allUsers.Count) users."
+    foreach ($user in $allUsers) {
+        $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+        $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+        $item.SubItems.Add($user.Id) | Out-Null
+        $item.Tag = $user
+        $listView.Items.Add($item) | Out-Null
+    }
+    $form.ShowDialog() | Out-Null
+    return $selectedUsers
 }
