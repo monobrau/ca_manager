@@ -133,6 +133,256 @@ function Show-InputBox {
     }
 }
 
+#region Helper Functions
+
+# Validation Helpers
+function Test-GraphConnectionAndSelection {
+    param(
+        $listView,
+        [string]$itemType
+    )
+
+    if (-not $global:isConnected) {
+        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
+        return $false
+    }
+
+    if ($listView.SelectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Please select a $itemType.", "No Selection")
+        return $false
+    }
+
+    return $true
+}
+
+function Test-ResourceExists {
+    param(
+        [string]$ResourceType,
+        [string]$ResourceId
+    )
+
+    try {
+        switch ($ResourceType) {
+            "NamedLocation" {
+                $resource = Get-MgIdentityConditionalAccessNamedLocation -NamedLocationId $ResourceId -ErrorAction SilentlyContinue
+            }
+            "Policy" {
+                $resource = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $ResourceId -ErrorAction SilentlyContinue
+            }
+            default {
+                return $false
+            }
+        }
+        return ($null -ne $resource)
+    } catch {
+        return $false
+    }
+}
+
+# Data Processing Helpers
+function Copy-PolicyConditionArray {
+    param(
+        $SourceArray,
+        [string]$PropertyName
+    )
+
+    if ($SourceArray -and $SourceArray.Count -gt 0) {
+        $cleaned = @($SourceArray | Where-Object { $_ -ne $null -and $_ -ne "" })
+        if ($cleaned.Count -gt 0) {
+            return $cleaned
+        }
+    }
+    return $null
+}
+
+function Copy-PolicyConditionObject {
+    param(
+        $SourceObject,
+        [string[]]$PropertyNames
+    )
+
+    if (-not $SourceObject) {
+        return $null
+    }
+
+    $result = @{}
+    $hasValidProperty = $false
+
+    foreach ($prop in $PropertyNames) {
+        $value = $SourceObject.$prop
+
+        if ($value -is [array] -or $value -is [System.Collections.ArrayList]) {
+            $cleaned = Copy-PolicyConditionArray -SourceArray $value -PropertyName $prop
+            if ($cleaned) {
+                $result[$prop] = $cleaned
+                $hasValidProperty = $true
+            }
+        }
+        elseif ($null -ne $value -and $value -ne "") {
+            $result[$prop] = $value
+            $hasValidProperty = $true
+        }
+    }
+
+    if ($hasValidProperty) {
+        return $result
+    }
+    return $null
+}
+
+function Remove-NullValuesOptimized {
+    param($obj)
+
+    if ($null -eq $obj) {
+        return $null
+    }
+
+    if ($obj -is [hashtable]) {
+        $cleaned = @{}
+        foreach ($key in $obj.Keys) {
+            $value = Remove-NullValuesOptimized $obj[$key]
+            if ($null -ne $value) {
+                $cleaned[$key] = $value
+            }
+        }
+        return ($cleaned.Count -gt 0) ? $cleaned : $null
+    }
+
+    if ($obj -is [array] -or $obj -is [System.Collections.ArrayList]) {
+        $cleaned = [System.Collections.ArrayList]::new()
+        foreach ($item in $obj) {
+            $value = Remove-NullValuesOptimized $item
+            if ($null -ne $value) {
+                [void]$cleaned.Add($value)
+            }
+        }
+        if ($cleaned.Count -gt 0) {
+            # Force array return even for single items
+            return ,$cleaned.ToArray()
+        }
+        return $null
+    }
+
+    return $obj
+}
+
+# API Operation Helpers
+function Invoke-GraphOperationWithRetry {
+    param(
+        [string]$Method,
+        [string]$Uri,
+        $Body = $null,
+        [int]$MaxRetries = 3,
+        [int]$InitialDelayMs = 500
+    )
+
+    $attempt = 0
+    $delay = $InitialDelayMs
+
+    while ($attempt -lt $MaxRetries) {
+        try {
+            $params = @{
+                Method = $Method
+                Uri = $Uri
+            }
+
+            if ($Body) {
+                if ($Body -is [string]) {
+                    $params.Body = $Body
+                } else {
+                    $params.Body = ($Body | ConvertTo-Json -Depth 10)
+                }
+                $params.ContentType = "application/json"
+            }
+
+            $response = Invoke-MgGraphRequest @params
+            return $response
+        }
+        catch {
+            $attempt++
+            if ($attempt -ge $MaxRetries) {
+                throw
+            }
+
+            Write-Host "Retry attempt $attempt/$MaxRetries after ${delay}ms..." -ForegroundColor Yellow
+            Start-Sleep -Milliseconds $delay
+            $delay *= 2  # Exponential backoff
+        }
+    }
+}
+
+function Wait-ForGraphOperation {
+    param(
+        [string]$ResourceType,
+        [string]$ResourceId,
+        [int]$MaxAttempts = 10,
+        [int]$DelayMs = 500
+    )
+
+    for ($i = 0; $i -lt $MaxAttempts; $i++) {
+        if ($i -gt 0) {
+            Start-Sleep -Milliseconds $DelayMs
+        }
+
+        if (Test-ResourceExists -ResourceType $ResourceType -ResourceId $ResourceId) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+# UI Helpers
+function Show-ErrorMessage {
+    param(
+        [string]$Message,
+        [string]$Title = "Error",
+        [string]$Details = ""
+    )
+
+    $fullMessage = $Message
+    if ($Details) {
+        $fullMessage += "`n`n$Details"
+    }
+
+    [System.Windows.Forms.MessageBox]::Show(
+        $fullMessage,
+        $Title,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    )
+}
+
+function Show-SuccessMessage {
+    param(
+        [string]$Message,
+        [string]$Title = "Success"
+    )
+
+    [System.Windows.Forms.MessageBox]::Show(
+        $Message,
+        $Title,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+}
+
+function Show-WarningMessage {
+    param(
+        [string]$Message,
+        [string]$Title = "Warning"
+    )
+
+    [System.Windows.Forms.MessageBox]::Show(
+        $Message,
+        $Title,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+}
+
+#endregion Helper Functions
+
 # Global Variables
 $global:isConnected = $false
 $global:tenantId = ""
@@ -1016,140 +1266,291 @@ function Show-CreateCountryLocationDialog {
     Show-CountryLocationDialog -listView $listView -Mode "Create"
 }
 
-function Edit-SelectedNamedLocation {
-    param($listView)
-    
+function Show-IpLocationDialog {
+    param(
+        $listView,
+        [string]$Mode = "Create",  # "Create" or "Edit"
+        $ExistingLocation = $null
+    )
+
     if (-not $global:isConnected) {
         [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
         return
     }
-    
-    if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select a Named Location to edit.", "No Selection")
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $Mode + " IP Named Location"
+    $form.Size = New-Object System.Drawing.Size(550, 400)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedDialog"
+
+    # Name
+    $nameLabel = New-Object System.Windows.Forms.Label
+    $nameLabel.Text = "Display Name:"
+    $nameLabel.Location = New-Object System.Drawing.Point(10, 20)
+    $nameLabel.Size = New-Object System.Drawing.Size(100, 20)
+    $form.Controls.Add($nameLabel)
+
+    $nameTextBox = New-Object System.Windows.Forms.TextBox
+    $nameTextBox.Location = New-Object System.Drawing.Point(120, 18)
+    $nameTextBox.Size = New-Object System.Drawing.Size(400, 20)
+    $form.Controls.Add($nameTextBox)
+
+    # IP Ranges
+    $ipRangesLabel = New-Object System.Windows.Forms.Label
+    $ipRangesLabel.Text = "IP Ranges:"
+    $ipRangesLabel.Location = New-Object System.Drawing.Point(10, 50)
+    $ipRangesLabel.Size = New-Object System.Drawing.Size(100, 20)
+    $form.Controls.Add($ipRangesLabel)
+
+    $ipRangesTextBox = New-Object System.Windows.Forms.TextBox
+    $ipRangesTextBox.Location = New-Object System.Drawing.Point(10, 75)
+    $ipRangesTextBox.Size = New-Object System.Drawing.Size(510, 100)
+    $ipRangesTextBox.Multiline = $true
+    $ipRangesTextBox.ScrollBars = "Vertical"
+    $form.Controls.Add($ipRangesTextBox)
+
+    # Help text
+    $helpLabel = New-Object System.Windows.Forms.Label
+    $helpLabel.Text = "Enter IP ranges (one per line). Formats: 192.168.1.1/32, 10.0.0.0/8, 2001:db8::/32"
+    $helpLabel.Location = New-Object System.Drawing.Point(10, 180)
+    $helpLabel.Size = New-Object System.Drawing.Size(510, 20)
+    $helpLabel.ForeColor = [System.Drawing.Color]::Gray
+    $helpLabel.Font = New-Object System.Drawing.Font($helpLabel.Font.FontFamily, 8)
+    $form.Controls.Add($helpLabel)
+
+    # Is Trusted
+    $isTrustedCheckBox = New-Object System.Windows.Forms.CheckBox
+    $isTrustedCheckBox.Text = "Trusted location (skip MFA when accessing from these IPs)"
+    $isTrustedCheckBox.Location = New-Object System.Drawing.Point(10, 210)
+    $isTrustedCheckBox.Size = New-Object System.Drawing.Size(400, 20)
+    $form.Controls.Add($isTrustedCheckBox)
+
+    # Pre-populate if editing
+    if ($ExistingLocation -and $Mode -eq "Edit") {
+        $nameTextBox.Text = $ExistingLocation.DisplayName
+
+        $ipRanges = $ExistingLocation.AdditionalProperties['ipRanges']
+        if ($ipRanges) {
+            $ipRangesText = ""
+            foreach ($range in $ipRanges) {
+                if ($range.cidrAddress) {
+                    $ipRangesText += $range.cidrAddress + "`r`n"
+                }
+            }
+            $ipRangesTextBox.Text = $ipRangesText.TrimEnd()
+        }
+
+        $isTrusted = $ExistingLocation.AdditionalProperties['isTrusted']
+        if ($isTrusted) {
+            $isTrustedCheckBox.Checked = $isTrusted
+        }
+    }
+
+    # Buttons
+    $actionButton = New-Object System.Windows.Forms.Button
+    $actionButton.Text = $Mode
+    $actionButton.Location = New-Object System.Drawing.Point(360, 250)
+    $actionButton.Size = New-Object System.Drawing.Size(75, 23)
+    $actionButton.Add_Click({
+        if ([string]::IsNullOrWhiteSpace($nameTextBox.Text)) {
+            [System.Windows.Forms.MessageBox]::Show("Please enter a display name.", "Validation Error")
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($ipRangesTextBox.Text)) {
+            [System.Windows.Forms.MessageBox]::Show("Please enter at least one IP range.", "Validation Error")
+            return
+        }
+
+        try {
+            # Parse IP ranges
+            $ipRangeLines = $ipRangesTextBox.Text -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            $ipRangesArray = @()
+
+            foreach ($line in $ipRangeLines) {
+                $ipRangesArray += @{ cidrAddress = $line }
+            }
+
+            $success = $false
+
+            if ($Mode -eq "Edit") {
+                # Update existing location using PATCH
+                $updateBody = @{
+                    displayName = $nameTextBox.Text
+                    ipRanges = $ipRangesArray
+                    isTrusted = $isTrustedCheckBox.Checked
+                } | ConvertTo-Json -Depth 10
+
+                Write-Host ("Updating IP location " + $ExistingLocation.Id + " with: " + $updateBody) -ForegroundColor Cyan
+                $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
+                $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $updateBody -ContentType "application/json"
+                Write-Host ("Update response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
+                $success = $true
+                Show-SuccessMessage "IP Named Location updated successfully!"
+            } else {
+                # Create new location using REST API
+                $createParams = @{
+                    "@odata.type" = "#microsoft.graph.ipNamedLocation"
+                    displayName = $nameTextBox.Text
+                    ipRanges = $ipRangesArray
+                    isTrusted = $isTrustedCheckBox.Checked
+                }
+
+                $jsonBody = $createParams | ConvertTo-Json -Depth 10
+                Write-Host ("Creating IP location with: " + $jsonBody) -ForegroundColor Cyan
+
+                $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
+                $response = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $jsonBody -ContentType "application/json"
+                Write-Host ("Create response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
+                $success = $true
+                Show-SuccessMessage "IP Named Location created successfully!"
+            }
+
+            if ($success) {
+                $form.Close()
+                # Wait for operation to complete
+                if (Wait-ForGraphOperation -ResourceType "NamedLocation" -ResourceId $response.id -MaxAttempts 10) {
+                    Refresh-NamedLocationsList $listView
+                } else {
+                    Start-Sleep -Seconds 1
+                    Refresh-NamedLocationsList $listView
+                }
+            }
+        } catch {
+            $errorMessage = "Error processing IP Named Location:`n`n"
+            $errorMessage += "Error: " + $_.Exception.Message + "`n`n"
+            $errorMessage += "Settings:`n"
+            $errorMessage += "- Name: " + $nameTextBox.Text + "`n"
+            $errorMessage += "- IP Ranges: " + ($ipRangeLines -join ', ') + "`n"
+            $errorMessage += "- Is Trusted: " + $isTrustedCheckBox.Checked + "`n`n"
+
+            if ($_.Exception.Message -like "*BadRequest*") {
+                $errorMessage += "Common fixes:`n"
+                $errorMessage += "* Use valid CIDR notation: 192.168.1.0/24, 10.0.0.0/8`n"
+                $errorMessage += "* For single IP use /32: 192.168.1.1/32`n"
+                $errorMessage += "* IPv6 is supported: 2001:db8::/32`n"
+                $errorMessage += "* Ensure you have the required permissions"
+            }
+
+            Write-Host ("ERROR: " + $errorMessage) -ForegroundColor Red
+            Show-ErrorMessage $errorMessage "Error Details"
+        }
+    })
+    $form.Controls.Add($actionButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(445, 250)
+    $cancelButton.Size = New-Object System.Drawing.Size(75, 23)
+    $cancelButton.Add_Click({ $form.Close() })
+    $form.Controls.Add($cancelButton)
+
+    $form.ShowDialog() | Out-Null
+}
+
+function Show-CreateIpLocationDialog {
+    param($listView)
+    Show-IpLocationDialog -listView $listView -Mode "Create"
+}
+
+function Edit-SelectedNamedLocation {
+    param($listView)
+
+    if (-not (Test-GraphConnectionAndSelection -listView $listView -itemType "Named Location to edit")) {
         return
     }
 
     $selectedItem = $listView.SelectedItems[0]
     $location = $selectedItem.Tag
-    
-    # Check if it is a country-based location
+
+    # Check the location type and open the appropriate dialog
     $odataType = $location.AdditionalProperties.'@odata.type'
-    if ($odataType -ne '#microsoft.graph.countryNamedLocation') {
-        [System.Windows.Forms.MessageBox]::Show("Only country-based Named Locations can be edited with this tool.", "Not Supported")
-        return
+
+    switch ($odataType) {
+        '#microsoft.graph.countryNamedLocation' {
+            Show-CountryLocationDialog -listView $listView -Mode "Edit" -ExistingLocation $location
+        }
+        '#microsoft.graph.ipNamedLocation' {
+            Show-IpLocationDialog -listView $listView -Mode "Edit" -ExistingLocation $location
+        }
+        default {
+            Show-ErrorMessage "Unknown Named Location type: $odataType" "Not Supported"
+        }
     }
-    
-    Show-CountryLocationDialog -listView $listView -Mode "Edit" -ExistingLocation $location
 }
 
 function Copy-SelectedNamedLocation {
     param($listView)
-    
-    if (-not $global:isConnected) {
-        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
-        return
-    }
-    
-    if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select a Named Location to copy.", "No Selection")
+
+    if (-not (Test-GraphConnectionAndSelection -listView $listView -itemType "Named Location to copy")) {
         return
     }
 
     $selectedItem = $listView.SelectedItems[0]
     $location = $selectedItem.Tag
-    
-    # Check if it is a country-based location
     $odataType = $location.AdditionalProperties.'@odata.type'
-    if ($odataType -ne '#microsoft.graph.countryNamedLocation') {
-        [System.Windows.Forms.MessageBox]::Show("Only country-based Named Locations can be copied with this tool.", "Not Supported")
-        return
-    }
-    
-    # Get the country codes and settings from the source
-    $sourceCountries = $location.AdditionalProperties['countriesAndRegions']
-    $sourceIncludeUnknown = $location.AdditionalProperties['includeUnknownCountriesAndRegions']
-    
+
     # Prompt for new name
-    $promptMessage = "Enter a name for the new Named Location:`n`nThis will copy the country codes (" + ($sourceCountries -join ', ') + ") and settings from '" + $location.DisplayName + "'"
     $defaultName = "Copy of " + $location.DisplayName
-    
-    $newName = Show-InputBox -Prompt $promptMessage -Title "Copy Named Location" -DefaultValue $defaultName
-    
+    $newName = Show-InputBox -Prompt "Enter a name for the new Named Location:" -Title "Copy Named Location" -DefaultValue $defaultName
+
     if ([string]::IsNullOrWhiteSpace($newName)) {
         return
     }
-    
+
     try {
-        # Try the PowerShell cmdlet approach first (often more reliable)
-        try {
-            Write-Host "Attempting copy with PowerShell cmdlet..." -ForegroundColor Yellow
-            
-            $params = @{
-                "@odata.type" = "#microsoft.graph.countryNamedLocation"
-                DisplayName = $newName
-                CountriesAndRegions = $sourceCountries
-                IncludeUnknownCountriesAndRegions = $sourceIncludeUnknown
+        $createParams = @{
+            "@odata.type" = $odataType
+            displayName = $newName
+        }
+
+        # Copy settings based on location type
+        switch ($odataType) {
+            '#microsoft.graph.countryNamedLocation' {
+                Write-Host "Copying country-based Named Location..." -ForegroundColor Cyan
+                $createParams['countriesAndRegions'] = $location.AdditionalProperties['countriesAndRegions']
+                $createParams['includeUnknownCountriesAndRegions'] = [bool]$location.AdditionalProperties['includeUnknownCountriesAndRegions']
             }
-            
-            Write-Host ("PowerShell params: " + ($params | ConvertTo-Json)) -ForegroundColor Cyan
-            New-MgIdentityConditionalAccessNamedLocation -BodyParameter $params
-            
-            Write-Host "PowerShell cmdlet copy successful!" -ForegroundColor Green
-            [System.Windows.Forms.MessageBox]::Show("Named Location copied successfully as '" + $newName + "'!", "Success")
-            
-            # Small delay to allow Microsoft Graph to process the new location
+            '#microsoft.graph.ipNamedLocation' {
+                Write-Host "Copying IP-based Named Location..." -ForegroundColor Cyan
+                $createParams['ipRanges'] = $location.AdditionalProperties['ipRanges']
+                $createParams['isTrusted'] = [bool]$location.AdditionalProperties['isTrusted']
+            }
+            default {
+                Show-ErrorMessage "Unknown Named Location type: $odataType" "Not Supported"
+                return
+            }
+        }
+
+        # Use REST API for consistent behavior
+        $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
+        $response = Invoke-GraphOperationWithRetry -Method POST -Uri $uri -Body $createParams
+
+        Write-Host "Named Location copied successfully!" -ForegroundColor Green
+        Show-SuccessMessage "Named Location copied successfully as '$newName'!"
+
+        # Wait for operation to complete
+        if (Wait-ForGraphOperation -ResourceType "NamedLocation" -ResourceId $response.id) {
+            Refresh-NamedLocationsList $listView
+        } else {
             Start-Sleep -Seconds 1
             Refresh-NamedLocationsList $listView
-            return
-        } catch {
-            Write-Host ("PowerShell cmdlet failed: " + $_.Exception.Message) -ForegroundColor Red
-            Write-Host "Trying REST API approach..." -ForegroundColor Yellow
         }
-        
-        # Fallback to REST API with cleaned data
-        $createParams = @{
-            "@odata.type" = "#microsoft.graph.countryNamedLocation"
-            displayName = $newName
-            countriesAndRegions = $sourceCountries
-            includeUnknownCountriesAndRegions = [bool]$sourceIncludeUnknown
-        }
-        
-        $jsonBody = $createParams | ConvertTo-Json -Depth 10
-        Write-Host ("Creating copy with REST API: " + $jsonBody) -ForegroundColor Cyan
-        
-        $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
-        $response = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $jsonBody -ContentType "application/json"
-        
-        Write-Host ("REST API copy successful: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
-        [System.Windows.Forms.MessageBox]::Show("Named Location copied successfully as '" + $newName + "'!", "Success")
-        
-        # Small delay to allow Microsoft Graph to process the new location
-        Start-Sleep -Seconds 1
-        Refresh-NamedLocationsList $listView
     } catch {
         $errorMessage = "Error copying Named Location:`n`n"
         $errorMessage += "Error: " + $_.Exception.Message + "`n`n"
         $errorMessage += "Source: " + $location.DisplayName + "`n"
-        $errorMessage += "Target Name: " + $newName + "`n"
-        $errorMessage += "Countries: " + ($sourceCountries -join ', ') + "`n"
-        $errorMessage += "Include Unknown: " + $sourceIncludeUnknown + "`n`n"
-        $errorMessage += "Try using a simpler name without special characters."
-        
+        $errorMessage += "Target Name: " + $newName
+
         Write-Host ("Copy error: " + $errorMessage) -ForegroundColor Red
-        [System.Windows.Forms.MessageBox]::Show($errorMessage, "Copy Error")
+        Show-ErrorMessage $errorMessage "Copy Error"
     }
 }
 
 function Rename-SelectedNamedLocation {
     param($listView)
-    
-    if (-not $global:isConnected) {
-        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
-        return
-    }
-    
-    if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select a Named Location to rename.", "No Selection")
+
+    if (-not (Test-GraphConnectionAndSelection -listView $listView -itemType "Named Location to rename")) {
         return
     }
 
@@ -1158,32 +1559,35 @@ function Rename-SelectedNamedLocation {
     $locationId = $selectedItem.SubItems[1].Text
 
     $newName = Show-InputBox -Prompt "Enter new display name:" -Title "Rename Named Location" -DefaultValue $currentName
-    
+
     if ([string]::IsNullOrWhiteSpace($newName) -or $newName -eq $currentName) {
         return
     }
 
     try {
         # Check if the location still exists before trying to rename
-        $existingLocation = Get-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locationId -ErrorAction SilentlyContinue
-        if (-not $existingLocation) {
-            [System.Windows.Forms.MessageBox]::Show("The selected Named Location no longer exists. Refreshing list.", "Not Found")
+        if (-not (Test-ResourceExists -ResourceType "NamedLocation" -ResourceId $locationId)) {
+            Show-WarningMessage "The selected Named Location no longer exists. Refreshing list." "Not Found"
             Refresh-NamedLocationsList $listView
             return
         }
-        
+
         Update-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locationId -DisplayName $newName
-        [System.Windows.Forms.MessageBox]::Show("Named Location renamed successfully!", "Success")
-        
-        # Small delay before refresh
-        Start-Sleep -Seconds 1
-        Refresh-NamedLocationsList $listView
-    } catch {
-        if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*") {
-            [System.Windows.Forms.MessageBox]::Show("The Named Location no longer exists. Refreshing list.", "Not Found")
+        Show-SuccessMessage "Named Location renamed successfully!"
+
+        # Wait for operation to complete
+        if (Wait-ForGraphOperation -ResourceType "NamedLocation" -ResourceId $locationId) {
             Refresh-NamedLocationsList $listView
         } else {
-            [System.Windows.Forms.MessageBox]::Show("Error renaming Named Location: $_", "Error")
+            Start-Sleep -Seconds 1
+            Refresh-NamedLocationsList $listView
+        }
+    } catch {
+        if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*") {
+            Show-WarningMessage "The Named Location no longer exists. Refreshing list." "Not Found"
+            Refresh-NamedLocationsList $listView
+        } else {
+            Show-ErrorMessage "Error renaming Named Location: $_"
         }
     }
 }
@@ -1376,14 +1780,8 @@ function Remove-SelectedPolicy {
 
 function Copy-SelectedPolicy {
     param($listView)
-    
-    if (-not $global:isConnected) {
-        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
-        return
-    }
-    
-    if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select a Conditional Access Policy to copy.", "No Selection")
+
+    if (-not (Test-GraphConnectionAndSelection -listView $listView -itemType "Conditional Access Policy to copy")) {
         return
     }
 
@@ -1391,197 +1789,178 @@ function Copy-SelectedPolicy {
     $policy = $selectedItem.Tag
     $policyId = $policy.Id
     $sourceName = $policy.DisplayName
-    
+
     # Prompt for new name
-    $promptMessage = "Enter a name for the new Conditional Access Policy:`n`nThis will copy all settings from '$sourceName'"
     $defaultName = "Copy of $sourceName"
-    
-    $newName = Show-InputBox -Prompt $promptMessage -Title "Copy Conditional Access Policy" -DefaultValue $defaultName
-    
+    $newName = Show-InputBox -Prompt "Enter a name for the new Conditional Access Policy:" -Title "Copy Policy" -DefaultValue $defaultName
+
     if ([string]::IsNullOrWhiteSpace($newName)) {
         return
     }
-    
+
     try {
         Write-Host "Copying Conditional Access Policy: $sourceName" -ForegroundColor Yellow
-        
+
         # Get the full policy details
         $fullPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
-        
+
         if (-not $fullPolicy) {
-            [System.Windows.Forms.MessageBox]::Show("The selected policy no longer exists. Refreshing list.", "Not Found")
+            Show-WarningMessage "The selected policy no longer exists. Refreshing list." "Not Found"
             Refresh-PoliciesList $listView
             return
         }
-        
-        Write-Host "Analyzing source policy structure..." -ForegroundColor Cyan
-        
-        # Start with a minimal working policy structure
+
+        # Start with base policy structure
         $newPolicyBody = @{
             displayName = $newName
-            state = "disabled"
-            conditions = @{
-                users = @{
-                    includeUsers = @("All")
-                }
-                applications = @{
-                    includeApplications = @("All")  
-                }
-            }
-            grantControls = @{
-                operator = "OR"
-                builtInControls = @("block")
-            }
+            state = "disabled"  # Safety first
+            conditions = @{}
+            grantControls = @{}
         }
-        
-        # Try to copy conditions if they exist and are valid
+
+        # Copy all condition types using helper functions
         if ($fullPolicy.Conditions) {
             Write-Host "Copying policy conditions..." -ForegroundColor Cyan
-            
-            # Copy users
-            if ($fullPolicy.Conditions.Users) {
-                $userConditions = @{}
-                if ($fullPolicy.Conditions.Users.IncludeUsers -and $fullPolicy.Conditions.Users.IncludeUsers.Count -gt 0) {
-                    $includeUsers = @($fullPolicy.Conditions.Users.IncludeUsers | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($includeUsers.Count -gt 0) {
-                        $userConditions.includeUsers = $includeUsers
-                    }
-                }
-                if ($fullPolicy.Conditions.Users.ExcludeUsers -and $fullPolicy.Conditions.Users.ExcludeUsers.Count -gt 0) {
-                    $excludeUsers = @($fullPolicy.Conditions.Users.ExcludeUsers | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($excludeUsers.Count -gt 0) {
-                        $userConditions.excludeUsers = $excludeUsers
-                    }
-                }
-                if ($fullPolicy.Conditions.Users.IncludeGroups -and $fullPolicy.Conditions.Users.IncludeGroups.Count -gt 0) {
-                    $includeGroups = @($fullPolicy.Conditions.Users.IncludeGroups | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($includeGroups.Count -gt 0) {
-                        $userConditions.includeGroups = $includeGroups
-                    }
-                }
-                if ($fullPolicy.Conditions.Users.ExcludeGroups -and $fullPolicy.Conditions.Users.ExcludeGroups.Count -gt 0) {
-                    $excludeGroups = @($fullPolicy.Conditions.Users.ExcludeGroups | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($excludeGroups.Count -gt 0) {
-                        $userConditions.excludeGroups = $excludeGroups
-                    }
-                }
-                if ($userConditions.Count -gt 0) {
-                    $newPolicyBody.conditions.users = $userConditions
+            $conditions = @{}
+
+            # Users conditions
+            $userProps = @('IncludeUsers', 'ExcludeUsers', 'IncludeGroups', 'ExcludeGroups', 'IncludeRoles', 'ExcludeRoles')
+            $userConditions = Copy-PolicyConditionObject -SourceObject $fullPolicy.Conditions.Users -PropertyNames $userProps
+            if ($userConditions) {
+                $conditions.users = $userConditions
+                Write-Host "  - Copied user conditions" -ForegroundColor Gray
+            }
+
+            # Application conditions
+            $appProps = @('IncludeApplications', 'ExcludeApplications', 'IncludeUserActions', 'IncludeAuthenticationContextClassReferences')
+            $appConditions = Copy-PolicyConditionObject -SourceObject $fullPolicy.Conditions.Applications -PropertyNames $appProps
+            if ($appConditions) {
+                $conditions.applications = $appConditions
+                Write-Host "  - Copied application conditions" -ForegroundColor Gray
+            }
+
+            # Location conditions
+            $locationProps = @('IncludeLocations', 'ExcludeLocations')
+            $locationConditions = Copy-PolicyConditionObject -SourceObject $fullPolicy.Conditions.Locations -PropertyNames $locationProps
+            if ($locationConditions) {
+                $conditions.locations = $locationConditions
+                Write-Host "  - Copied location conditions" -ForegroundColor Gray
+            }
+
+            # Platform conditions
+            $platformProps = @('IncludePlatforms', 'ExcludePlatforms')
+            $platformConditions = Copy-PolicyConditionObject -SourceObject $fullPolicy.Conditions.Platforms -PropertyNames $platformProps
+            if ($platformConditions) {
+                $conditions.platforms = $platformConditions
+                Write-Host "  - Copied platform conditions" -ForegroundColor Gray
+            }
+
+            # Device state conditions (legacy, may be null)
+            if ($fullPolicy.Conditions.DeviceStates) {
+                $deviceStateProps = @('IncludeStates', 'ExcludeStates')
+                $deviceStates = Copy-PolicyConditionObject -SourceObject $fullPolicy.Conditions.DeviceStates -PropertyNames $deviceStateProps
+                if ($deviceStates) {
+                    $conditions.deviceStates = $deviceStates
+                    Write-Host "  - Copied device state conditions" -ForegroundColor Gray
                 }
             }
-            
-            # Copy applications
-            if ($fullPolicy.Conditions.Applications) {
-                $appConditions = @{}
-                if ($fullPolicy.Conditions.Applications.IncludeApplications -and $fullPolicy.Conditions.Applications.IncludeApplications.Count -gt 0) {
-                    $includeApps = @($fullPolicy.Conditions.Applications.IncludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($includeApps.Count -gt 0) {
-                        $appConditions.includeApplications = $includeApps
-                    }
-                }
-                if ($fullPolicy.Conditions.Applications.ExcludeApplications -and $fullPolicy.Conditions.Applications.ExcludeApplications.Count -gt 0) {
-                    $excludeApps = @($fullPolicy.Conditions.Applications.ExcludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($excludeApps.Count -gt 0) {
-                        $appConditions.excludeApplications = $excludeApps
-                    }
-                }
-                if ($appConditions.Count -gt 0) {
-                    $newPolicyBody.conditions.applications = $appConditions
+
+            # Device filter (newer)
+            if ($fullPolicy.Conditions.Devices) {
+                $deviceProps = @('IncludeDevices', 'ExcludeDevices', 'DeviceFilter')
+                $devices = Copy-PolicyConditionObject -SourceObject $fullPolicy.Conditions.Devices -PropertyNames $deviceProps
+                if ($devices) {
+                    $conditions.devices = $devices
+                    Write-Host "  - Copied device conditions" -ForegroundColor Gray
                 }
             }
-            
-            # Copy locations if they exist
-            if ($fullPolicy.Conditions.Locations) {
-                $locationConditions = @{}
-                if ($fullPolicy.Conditions.Locations.IncludeLocations -and $fullPolicy.Conditions.Locations.IncludeLocations.Count -gt 0) {
-                    $includeLocations = @($fullPolicy.Conditions.Locations.IncludeLocations | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($includeLocations.Count -gt 0) {
-                        $locationConditions.includeLocations = $includeLocations
-                    }
-                }
-                if ($fullPolicy.Conditions.Locations.ExcludeLocations -and $fullPolicy.Conditions.Locations.ExcludeLocations.Count -gt 0) {
-                    $excludeLocations = @($fullPolicy.Conditions.Locations.ExcludeLocations | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($excludeLocations.Count -gt 0) {
-                        $locationConditions.excludeLocations = $excludeLocations
-                    }
-                }
-                if ($locationConditions.Count -gt 0) {
-                    $newPolicyBody.conditions.locations = $locationConditions
+
+            # Client app types
+            $clientAppTypes = Copy-PolicyConditionArray -SourceArray $fullPolicy.Conditions.ClientAppTypes -PropertyName 'ClientAppTypes'
+            if ($clientAppTypes) {
+                $conditions.clientAppTypes = $clientAppTypes
+                Write-Host "  - Copied client app types" -ForegroundColor Gray
+            }
+
+            # Sign-in risk levels
+            $signInRiskLevels = Copy-PolicyConditionArray -SourceArray $fullPolicy.Conditions.SignInRiskLevels -PropertyName 'SignInRiskLevels'
+            if ($signInRiskLevels) {
+                $conditions.signInRiskLevels = $signInRiskLevels
+                Write-Host "  - Copied sign-in risk levels" -ForegroundColor Gray
+            }
+
+            # User risk levels
+            $userRiskLevels = Copy-PolicyConditionArray -SourceArray $fullPolicy.Conditions.UserRiskLevels -PropertyName 'UserRiskLevels'
+            if ($userRiskLevels) {
+                $conditions.userRiskLevels = $userRiskLevels
+                Write-Host "  - Copied user risk levels" -ForegroundColor Gray
+            }
+
+            # Service principal risk levels (newer)
+            if ($fullPolicy.Conditions.ServicePrincipalRiskLevels) {
+                $spRiskLevels = Copy-PolicyConditionArray -SourceArray $fullPolicy.Conditions.ServicePrincipalRiskLevels -PropertyName 'ServicePrincipalRiskLevels'
+                if ($spRiskLevels) {
+                    $conditions.servicePrincipalRiskLevels = $spRiskLevels
+                    Write-Host "  - Copied service principal risk levels" -ForegroundColor Gray
                 }
             }
-            
-            # Copy platforms if they exist
-            if ($fullPolicy.Conditions.Platforms) {
-                $platformConditions = @{}
-                if ($fullPolicy.Conditions.Platforms.IncludePlatforms -and $fullPolicy.Conditions.Platforms.IncludePlatforms.Count -gt 0) {
-                    $includePlatforms = @($fullPolicy.Conditions.Platforms.IncludePlatforms | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($includePlatforms.Count -gt 0) {
-                        $platformConditions.includePlatforms = $includePlatforms
-                    }
-                }
-                if ($fullPolicy.Conditions.Platforms.ExcludePlatforms -and $fullPolicy.Conditions.Platforms.ExcludePlatforms.Count -gt 0) {
-                    $excludePlatforms = @($fullPolicy.Conditions.Platforms.ExcludePlatforms | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    if ($excludePlatforms.Count -gt 0) {
-                        $platformConditions.excludePlatforms = $excludePlatforms
-                    }
-                }
-                if ($platformConditions.Count -gt 0) {
-                    $newPolicyBody.conditions.platforms = $platformConditions
+
+            # Client applications (newer)
+            if ($fullPolicy.Conditions.ClientApplications) {
+                $clientAppProps = @('IncludeServicePrincipals', 'ExcludeServicePrincipals')
+                $clientApps = Copy-PolicyConditionObject -SourceObject $fullPolicy.Conditions.ClientApplications -PropertyNames $clientAppProps
+                if ($clientApps) {
+                    $conditions.clientApplications = $clientApps
+                    Write-Host "  - Copied client applications" -ForegroundColor Gray
                 }
             }
+
+            $newPolicyBody.conditions = $conditions
         }
-        
-        # Try to copy grant controls
+
+        # Copy grant controls
         if ($fullPolicy.GrantControls) {
             Write-Host "Copying grant controls..." -ForegroundColor Cyan
-            $grantControls = @{}
-            
-            # Operator is required
-            if ($fullPolicy.GrantControls.Operator) {
-                $grantControls.operator = $fullPolicy.GrantControls.Operator
-            } else {
-                $grantControls.operator = "OR"  # Default fallback
+            $grantControls = @{
+                operator = $fullPolicy.GrantControls.Operator ?? "OR"
             }
-            
-            if ($fullPolicy.GrantControls.BuiltInControls -and $fullPolicy.GrantControls.BuiltInControls.Count -gt 0) {
-                $builtInControls = @($fullPolicy.GrantControls.BuiltInControls | Where-Object { $_ -ne $null -and $_ -ne "" })
-                if ($builtInControls.Count -gt 0) {
-                    $grantControls.builtInControls = $builtInControls
-                }
+
+            $builtInControls = Copy-PolicyConditionArray -SourceArray $fullPolicy.GrantControls.BuiltInControls -PropertyName 'BuiltInControls'
+            if ($builtInControls) {
+                $grantControls.builtInControls = $builtInControls
             }
-            
-            if ($fullPolicy.GrantControls.CustomAuthenticationFactors -and $fullPolicy.GrantControls.CustomAuthenticationFactors.Count -gt 0) {
-                $customFactors = @($fullPolicy.GrantControls.CustomAuthenticationFactors | Where-Object { $_ -ne $null -and $_ -ne "" })
-                if ($customFactors.Count -gt 0) {
-                    $grantControls.customAuthenticationFactors = $customFactors
-                }
+
+            $customFactors = Copy-PolicyConditionArray -SourceArray $fullPolicy.GrantControls.CustomAuthenticationFactors -PropertyName 'CustomAuthenticationFactors'
+            if ($customFactors) {
+                $grantControls.customAuthenticationFactors = $customFactors
             }
-            
-            if ($fullPolicy.GrantControls.TermsOfUse -and $fullPolicy.GrantControls.TermsOfUse.Count -gt 0) {
-                $termsOfUse = @($fullPolicy.GrantControls.TermsOfUse | Where-Object { $_ -ne $null -and $_ -ne "" })
-                if ($termsOfUse.Count -gt 0) {
-                    $grantControls.termsOfUse = $termsOfUse
-                }
+
+            $termsOfUse = Copy-PolicyConditionArray -SourceArray $fullPolicy.GrantControls.TermsOfUse -PropertyName 'TermsOfUse'
+            if ($termsOfUse) {
+                $grantControls.termsOfUse = $termsOfUse
             }
-            
+
+            if ($fullPolicy.GrantControls.AuthenticationStrength) {
+                $grantControls.authenticationStrength = @{ id = $fullPolicy.GrantControls.AuthenticationStrength.Id }
+            }
+
             $newPolicyBody.grantControls = $grantControls
-            Write-Host "Added grant controls with operator: $($grantControls.operator)" -ForegroundColor Gray
         }
-        
-        # Try to copy session controls (simplified)
+
+        # Copy session controls
         if ($fullPolicy.SessionControls) {
             Write-Host "Copying session controls..." -ForegroundColor Cyan
             $sessionControls = @{}
-            
-            if ($fullPolicy.SessionControls.ApplicationEnforcedRestrictions -and 
-                $fullPolicy.SessionControls.ApplicationEnforcedRestrictions.IsEnabled -ne $null) {
+
+            # Application enforced restrictions
+            if ($fullPolicy.SessionControls.ApplicationEnforcedRestrictions -and $null -ne $fullPolicy.SessionControls.ApplicationEnforcedRestrictions.IsEnabled) {
                 $sessionControls.applicationEnforcedRestrictions = @{
                     isEnabled = $fullPolicy.SessionControls.ApplicationEnforcedRestrictions.IsEnabled
                 }
             }
-            
-            if ($fullPolicy.SessionControls.CloudAppSecurity -and 
-                $fullPolicy.SessionControls.CloudAppSecurity.IsEnabled -ne $null) {
+
+            # Cloud app security
+            if ($fullPolicy.SessionControls.CloudAppSecurity -and $null -ne $fullPolicy.SessionControls.CloudAppSecurity.IsEnabled) {
                 $cloudAppSecurity = @{
                     isEnabled = $fullPolicy.SessionControls.CloudAppSecurity.IsEnabled
                 }
@@ -1590,23 +1969,29 @@ function Copy-SelectedPolicy {
                 }
                 $sessionControls.cloudAppSecurity = $cloudAppSecurity
             }
-            
-            if ($fullPolicy.SessionControls.SignInFrequency -and 
-                $fullPolicy.SessionControls.SignInFrequency.IsEnabled -ne $null) {
+
+            # Sign-in frequency
+            if ($fullPolicy.SessionControls.SignInFrequency -and $null -ne $fullPolicy.SessionControls.SignInFrequency.IsEnabled) {
                 $signInFreq = @{
                     isEnabled = $fullPolicy.SessionControls.SignInFrequency.IsEnabled
                 }
                 if ($fullPolicy.SessionControls.SignInFrequency.Type) {
                     $signInFreq.type = $fullPolicy.SessionControls.SignInFrequency.Type
                 }
-                if ($fullPolicy.SessionControls.SignInFrequency.Value -ne $null) {
+                if ($null -ne $fullPolicy.SessionControls.SignInFrequency.Value) {
                     $signInFreq.value = $fullPolicy.SessionControls.SignInFrequency.Value
+                }
+                if ($fullPolicy.SessionControls.SignInFrequency.AuthenticationType) {
+                    $signInFreq.authenticationType = $fullPolicy.SessionControls.SignInFrequency.AuthenticationType
+                }
+                if ($fullPolicy.SessionControls.SignInFrequency.FrequencyInterval) {
+                    $signInFreq.frequencyInterval = $fullPolicy.SessionControls.SignInFrequency.FrequencyInterval
                 }
                 $sessionControls.signInFrequency = $signInFreq
             }
-            
-            if ($fullPolicy.SessionControls.PersistentBrowser -and 
-                $fullPolicy.SessionControls.PersistentBrowser.IsEnabled -ne $null) {
+
+            # Persistent browser
+            if ($fullPolicy.SessionControls.PersistentBrowser -and $null -ne $fullPolicy.SessionControls.PersistentBrowser.IsEnabled) {
                 $persistentBrowser = @{
                     isEnabled = $fullPolicy.SessionControls.PersistentBrowser.IsEnabled
                 }
@@ -1615,128 +2000,68 @@ function Copy-SelectedPolicy {
                 }
                 $sessionControls.persistentBrowser = $persistentBrowser
             }
-            
-            # Only add session controls if we have valid controls
+
+            # Continuous access evaluation
+            if ($fullPolicy.SessionControls.ContinuousAccessEvaluation -and $null -ne $fullPolicy.SessionControls.ContinuousAccessEvaluation.Mode) {
+                $sessionControls.continuousAccessEvaluation = @{
+                    mode = $fullPolicy.SessionControls.ContinuousAccessEvaluation.Mode
+                }
+            }
+
+            # Disable resilience defaults
+            if ($null -ne $fullPolicy.SessionControls.DisableResilienceDefaults) {
+                $sessionControls.disableResilienceDefaults = $fullPolicy.SessionControls.DisableResilienceDefaults
+            }
+
             if ($sessionControls.Count -gt 0) {
                 $newPolicyBody.sessionControls = $sessionControls
-                Write-Host "Added session controls: $($sessionControls.Keys -join ', ')" -ForegroundColor Gray
-            } else {
-                Write-Host "No valid session controls found, skipping..." -ForegroundColor Gray
+                Write-Host "  - Added session controls: $($sessionControls.Keys -join ', ')" -ForegroundColor Gray
             }
         }
-        
-        Write-Host "Creating new policy: $newName" -ForegroundColor Cyan
-        Write-Host "Policy will be created in DISABLED state for safety" -ForegroundColor Yellow
-        
-        # Function to remove null values recursively and preserve arrays
-        function Remove-NullValues {
-            param($obj)
-            
-            if ($obj -eq $null) { return $null }
-            
-            if ($obj -is [hashtable]) {
-                $cleaned = @{}
-                foreach ($key in $obj.Keys) {
-                    $value = Remove-NullValues $obj[$key]
-                    if ($value -ne $null) {
-                        $cleaned[$key] = $value
-                    }
-                }
-                if ($cleaned.Count -gt 0) { 
-                    return $cleaned 
-                } else { 
-                    return $null 
-                }
-            }
-            
-            if ($obj -is [array] -or $obj -is [System.Collections.ArrayList]) {
-                $cleaned = @()
-                foreach ($item in $obj) {
-                    $value = Remove-NullValues $item
-                    if ($value -ne $null) {
-                        $cleaned += $value
-                    }
-                }
-                if ($cleaned.Count -gt 0) { 
-                    # Force array return even for single items
-                    return ,$cleaned
-                } else { 
-                    return $null 
-                }
-            }
-            
-            return $obj
-        }
-        
-        # Clean the policy of null values
-        $cleanedPolicy = Remove-NullValues $newPolicyBody
-        
-        # Debug: Show the array types before JSON conversion
-        Write-Host "DEBUG: Checking array preservation..." -ForegroundColor Magenta
-        if ($cleanedPolicy.grantControls.builtInControls) {
-            Write-Host "builtInControls type: $($cleanedPolicy.grantControls.builtInControls.GetType().Name), Count: $($cleanedPolicy.grantControls.builtInControls.Count)" -ForegroundColor Magenta
-        }
-        if ($cleanedPolicy.conditions.users.includeUsers) {
-            Write-Host "includeUsers type: $($cleanedPolicy.conditions.users.includeUsers.GetType().Name), Count: $($cleanedPolicy.conditions.users.includeUsers.Count)" -ForegroundColor Magenta
-        }
-        
-        # Convert to JSON and show for debugging
-        $jsonBody = $cleanedPolicy | ConvertTo-Json -Depth 10
-        Write-Host "JSON being sent (first 800 chars):" -ForegroundColor Gray
-        Write-Host $jsonBody.Substring(0, [Math]::Min(800, $jsonBody.Length)) -ForegroundColor Gray
-        
-        if ($jsonBody.Length -gt 800) {
-            Write-Host "... (truncated, total length: $($jsonBody.Length) chars)" -ForegroundColor Gray
-        }
-        
-        # Use REST API
+
+        # Clean null values and create policy
+        $cleanedPolicy = Remove-NullValuesOptimized $newPolicyBody
+
+        Write-Host "Creating new policy: $newName (DISABLED state)" -ForegroundColor Cyan
+
+        # Use REST API with retry
         $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies"
-        $response = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $jsonBody -ContentType "application/json"
-        
+        $response = Invoke-GraphOperationWithRetry -Method POST -Uri $uri -Body $cleanedPolicy
+
         Write-Host "✅ Policy created successfully!" -ForegroundColor Green
-        Write-Host ("New policy ID: " + $response.id) -ForegroundColor Green
-        
+
         $successMessage = "Conditional Access Policy copied successfully as '$newName'!`n`n"
         $successMessage += "⚠️ IMPORTANT: The new policy has been created in DISABLED state for safety.`n"
         $successMessage += "Please review the settings and enable it manually when ready.`n`n"
         $successMessage += "New Policy ID: " + $response.id
-        
-        [System.Windows.Forms.MessageBox]::Show($successMessage, "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-        
-        # Refresh the list
-        Start-Sleep -Seconds 2
-        Refresh-PoliciesList $listView
-        
+
+        Show-SuccessMessage $successMessage
+
+        # Wait for operation and refresh
+        if (Wait-ForGraphOperation -ResourceType "Policy" -ResourceId $response.id) {
+            Refresh-PoliciesList $listView
+        } else {
+            Start-Sleep -Seconds 2
+            Refresh-PoliciesList $listView
+        }
+
     } catch {
         Write-Host "❌ ERROR: Policy copy failed" -ForegroundColor Red
         Write-Host ("Error details: " + $_.Exception.Message) -ForegroundColor Red
-        
-        $errorMessage = "Error copying Conditional Access Policy:`n`n"
-        $errorMessage += "Error: " + $_.Exception.Message + "`n`n"
-        $errorMessage += "Source Policy: $sourceName`n"
-        $errorMessage += "Target Name: $newName`n`n"
-        $errorMessage += "This might be due to:`n"
-        $errorMessage += "• Missing permissions (need Policy.ReadWrite.ConditionalAccess)`n"
-        $errorMessage += "• Referenced objects (groups, named locations) that don't exist`n"
-        $errorMessage += "• Complex policy conditions that need manual recreation`n"
-        $errorMessage += "• Special characters in the policy name`n`n"
-        $errorMessage += "Try creating a simple test policy first to verify permissions."
-        
-        Write-Host $errorMessage -ForegroundColor Red
-        [System.Windows.Forms.MessageBox]::Show($errorMessage, "Copy Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+
+        $errorDetails = "This might be due to:`n"
+        $errorDetails += "• Missing permissions (need Policy.ReadWrite.ConditionalAccess)`n"
+        $errorDetails += "• Referenced objects (groups, named locations) that don't exist`n"
+        $errorDetails += "• Complex policy conditions that need manual recreation"
+
+        Show-ErrorMessage ("Error copying policy '$sourceName' to '$newName':`n`n" + $_.Exception.Message) "Copy Error" $errorDetails
     }
 }
 
 function Rename-SelectedPolicy {
     param($listView)
-    
-    if (-not $global:isConnected) {
-        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
-        return
-    }
-    
-    if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select a Conditional Access Policy to rename.", "No Selection")
+
+    if (-not (Test-GraphConnectionAndSelection -listView $listView -itemType "Conditional Access Policy to rename")) {
         return
     }
 
@@ -1746,32 +2071,35 @@ function Rename-SelectedPolicy {
     $policyId = $policy.Id
 
     $newName = Show-InputBox -Prompt "Enter new display name:" -Title "Rename Conditional Access Policy" -DefaultValue $currentName
-    
+
     if ([string]::IsNullOrWhiteSpace($newName) -or $newName -eq $currentName) {
         return
     }
 
     try {
         # Check if the policy still exists before trying to rename
-        $existingPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -ErrorAction SilentlyContinue
-        if (-not $existingPolicy) {
-            [System.Windows.Forms.MessageBox]::Show("The selected Conditional Access Policy no longer exists. Refreshing list.", "Not Found")
+        if (-not (Test-ResourceExists -ResourceType "Policy" -ResourceId $policyId)) {
+            Show-WarningMessage "The selected Conditional Access Policy no longer exists. Refreshing list." "Not Found"
             Refresh-PoliciesList $listView
             return
         }
-        
+
         Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -DisplayName $newName
-        [System.Windows.Forms.MessageBox]::Show("Conditional Access Policy renamed successfully!", "Success")
-        
-        # Small delay before refresh
-        Start-Sleep -Seconds 1
-        Refresh-PoliciesList $listView
-    } catch {
-        if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*") {
-            [System.Windows.Forms.MessageBox]::Show("The Conditional Access Policy no longer exists. Refreshing list.", "Not Found")
+        Show-SuccessMessage "Conditional Access Policy renamed successfully!"
+
+        # Wait for operation to complete
+        if (Wait-ForGraphOperation -ResourceType "Policy" -ResourceId $policyId) {
             Refresh-PoliciesList $listView
         } else {
-            [System.Windows.Forms.MessageBox]::Show("Error renaming Conditional Access Policy: $_", "Error")
+            Start-Sleep -Seconds 1
+            Refresh-PoliciesList $listView
+        }
+    } catch {
+        if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*") {
+            Show-WarningMessage "The Conditional Access Policy no longer exists. Refreshing list." "Not Found"
+            Refresh-PoliciesList $listView
+        } else {
+            Show-ErrorMessage "Error renaming Conditional Access Policy: $_"
         }
     }
 }
