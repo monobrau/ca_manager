@@ -79,11 +79,10 @@ function Show-InputBox {
     
     # Try to use native InputBox if Microsoft.VisualBasic is available
     try {
-        if ([System.Management.Automation.PSTypeName]'Microsoft.VisualBasic.Interaction').Type) {
-            return [Microsoft.VisualBasic.Interaction]::InputBox($Prompt, $Title, $DefaultValue)
-        }
+        $result = [Microsoft.VisualBasic.Interaction]::InputBox($Prompt, $Title, $DefaultValue)
+        return $result
     } catch {
-        # Fall through to custom implementation
+        # Fall through to custom implementation if VisualBasic is not available
     }
     
     # Custom InputBox implementation for PowerShell Core
