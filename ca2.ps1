@@ -2261,6 +2261,134 @@ function Show-ManageIncludedUsersDialog {
     Refresh-PoliciesList $listView
 }
 
+function Show-UserPickerDialog {
+    param(
+        [string]$Title = "Select Users",
+        [int]$MaxSelect = 0  # 0 = unlimited
+    )
+    if (-not $global:isConnected) {
+        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
+        return $null
+    }
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $Title
+    $form.Size = New-Object System.Drawing.Size(700, 600)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+
+    $searchLabel = New-Object System.Windows.Forms.Label
+    $searchLabel.Text = "Search:"
+    $searchLabel.Location = New-Object System.Drawing.Point(10, 10)
+    $searchLabel.Size = New-Object System.Drawing.Size(50, 20)
+    $form.Controls.Add($searchLabel)
+
+    $searchBox = New-Object System.Windows.Forms.TextBox
+    $searchBox.Location = New-Object System.Drawing.Point(65, 8)
+    $searchBox.Size = New-Object System.Drawing.Size(400, 20)
+    $form.Controls.Add($searchBox)
+
+    $listView = New-Object System.Windows.Forms.ListView
+    $listView.Location = New-Object System.Drawing.Point(10, 40)
+    $listView.Size = New-Object System.Drawing.Size(660, 460)
+    $listView.View = "Details"
+    $listView.FullRowSelect = $true
+    $listView.MultiSelect = $true
+    $listView.CheckBoxes = $false
+    $listView.Columns.Add("Display Name", 250) | Out-Null
+    $listView.Columns.Add("UserPrincipalName", 300) | Out-Null
+    $listView.Columns.Add("Id", 100) | Out-Null
+    $form.Controls.Add($listView)
+
+    $statusLabel = New-Object System.Windows.Forms.Label
+    $statusLabel.Text = "Loading users..."
+    $statusLabel.Location = New-Object System.Drawing.Point(10, 510)
+    $statusLabel.Size = New-Object System.Drawing.Size(600, 20)
+    $form.Controls.Add($statusLabel)
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "Add Selected"
+    $okButton.Location = New-Object System.Drawing.Point(500, 540)
+    $okButton.Size = New-Object System.Drawing.Size(80, 30)
+    $okButton.Enabled = $false
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(600, 540)
+    $cancelButton.Size = New-Object System.Drawing.Size(80, 30)
+    $cancelButton.Add_Click({ $form.Close() })
+    $form.Controls.Add($cancelButton)
+
+    $selectedUsers = @()
+    $allUsers = @()
+    $filteredUsers = @()
+
+    $okButton.Add_Click({
+        $selectedUsers = @()
+        foreach ($item in $listView.SelectedItems) {
+            $selectedUsers += $item.Tag
+        }
+        $form.Close()
+    })
+
+    $searchBox.Add_TextChanged({
+        $query = $searchBox.Text.Trim().ToLower()
+        $listView.Items.Clear()
+        if ([string]::IsNullOrWhiteSpace($query)) {
+            foreach ($user in $allUsers) {
+                $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+                $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+                $item.SubItems.Add($user.Id) | Out-Null
+                $item.Tag = $user
+                $listView.Items.Add($item) | Out-Null
+            }
+        } else {
+            foreach ($user in $allUsers | Where-Object { $_.DisplayName -like "*$query*" -or $_.UserPrincipalName -like "*$query*" }) {
+                $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+                $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+                $item.SubItems.Add($user.Id) | Out-Null
+                $item.Tag = $user
+                $listView.Items.Add($item) | Out-Null
+            }
+        }
+    })
+
+    $listView.Add_SelectedIndexChanged({
+        $okButton.Enabled = $listView.SelectedItems.Count -gt 0
+        if ($MaxSelect -gt 0 -and $listView.SelectedItems.Count -gt $MaxSelect) {
+            [System.Windows.Forms.MessageBox]::Show("You can select up to $MaxSelect users.", "Selection Limit")
+            # Deselect extras
+            for ($i = $MaxSelect; $i -lt $listView.SelectedItems.Count; $i++) {
+                $listView.SelectedItems[$i].Selected = $false
+            }
+        }
+    })
+
+    # Load users in background
+    $job = Start-Job -ScriptBlock {
+        Import-Module Microsoft.Graph.Users
+        Get-MgUser -All | Select-Object DisplayName,UserPrincipalName,Id
+    }
+    while (-not $job.HasExited) {
+        Start-Sleep -Milliseconds 200
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    $allUsers = Receive-Job $job
+    Remove-Job $job
+    $statusLabel.Text = "Loaded $($allUsers.Count) users."
+    foreach ($user in $allUsers) {
+        $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+        $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+        $item.SubItems.Add($user.Id) | Out-Null
+        $item.Tag = $user
+        $listView.Items.Add($item) | Out-Null
+    }
+    $form.ShowDialog() | Out-Null
+    return $selectedUsers
+}
+
 function Create-MainForm {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Conditional Access Management Tool"
