@@ -1789,15 +1789,33 @@ function Show-ManageUserExceptionsDialog {
         try {
             $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
             $currentExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+            $currentIncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+
+            # Filter out special values (All, None) - only keep GUIDs
             $newExcludeList = @()
-            if ($currentExcludeUsers) { $newExcludeList += $currentExcludeUsers }
+            if ($currentExcludeUsers) {
+                $newExcludeList += ($currentExcludeUsers | Where-Object {
+                    $_ -ne "All" -and $_ -ne "None" -and
+                    $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$"
+                })
+            }
             foreach ($user in $pickedUsers) {
                 if ($user.Id -notin $newExcludeList) {
                     $newExcludeList += $user.Id
                 }
             }
+
+            # Also filter IncludeUsers
+            $newIncludeList = @()
+            if ($currentIncludeUsers) {
+                $newIncludeList = @($currentIncludeUsers | Where-Object {
+                    $_ -ne "All" -and $_ -ne "None" -and
+                    $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$"
+                })
+            }
+
             $userConditions = @{
-                IncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+                IncludeUsers = $newIncludeList
                 ExcludeUsers = $newExcludeList
             }
             Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
@@ -1825,27 +1843,46 @@ function Show-ManageUserExceptionsDialog {
             try {
                 $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
                 $currentExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
-                
+                $currentIncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+
+                # Filter current users to only GUIDs
+                $filteredExcludeUsers = @()
+                if ($currentExcludeUsers) {
+                    $filteredExcludeUsers = @($currentExcludeUsers | Where-Object {
+                        $_ -ne "All" -and $_ -ne "None" -and
+                        $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$"
+                    })
+                }
+
                 # Remove selected indices
                 $indicesToRemove = @()
                 foreach ($index in $excludedListBox.SelectedIndices) {
                     $indicesToRemove += $index
                 }
-                
+
                 $newExcludeList = @()
-                for ($i = 0; $i -lt $currentExcludeUsers.Count; $i++) {
+                for ($i = 0; $i -lt $filteredExcludeUsers.Count; $i++) {
                     if ($i -notin $indicesToRemove) {
-                        $newExcludeList += $currentExcludeUsers[$i]
+                        $newExcludeList += $filteredExcludeUsers[$i]
                     }
                 }
-                
+
+                # Also filter IncludeUsers
+                $newIncludeList = @()
+                if ($currentIncludeUsers) {
+                    $newIncludeList = @($currentIncludeUsers | Where-Object {
+                        $_ -ne "All" -and $_ -ne "None" -and
+                        $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$"
+                    })
+                }
+
                 $userConditions = @{
-                    IncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+                    IncludeUsers = $newIncludeList
                     ExcludeUsers = $newExcludeList
                 }
-                
+
                 Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
-                
+
                 [System.Windows.Forms.MessageBox]::Show("Users removed successfully!", "Success")
                 Refresh-ExcludedUsers
             } catch {
@@ -1960,16 +1997,34 @@ function Show-ManageIncludedUsersDialog {
         try {
             $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
             $currentIncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+            $currentExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+
+            # Filter out special values (All, None) - only keep GUIDs
             $newIncludeList = @()
-            if ($currentIncludeUsers) { $newIncludeList += ($currentIncludeUsers | Where-Object { $_ -ne "All" }) }
+            if ($currentIncludeUsers) {
+                $newIncludeList = @($currentIncludeUsers | Where-Object {
+                    $_ -ne "All" -and $_ -ne "None" -and
+                    $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$"
+                })
+            }
             foreach ($user in $pickedUsers) {
                 if ($user.Id -notin $newIncludeList) {
                     $newIncludeList += $user.Id
                 }
             }
+
+            # Also filter ExcludeUsers
+            $newExcludeList = @()
+            if ($currentExcludeUsers) {
+                $newExcludeList = @($currentExcludeUsers | Where-Object {
+                    $_ -ne "All" -and $_ -ne "None" -and
+                    $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$"
+                })
+            }
+
             $userConditions = @{
                 IncludeUsers = $newIncludeList
-                ExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+                ExcludeUsers = $newExcludeList
             }
             Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
             [System.Windows.Forms.MessageBox]::Show("Users added successfully!", "Success")
@@ -1996,21 +2051,30 @@ function Show-ManageIncludedUsersDialog {
             try {
                 $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
                 $currentIncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
-                
+                $currentExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+
+                # Filter current users to only GUIDs
+                $filteredIncludeUsers = @()
+                if ($currentIncludeUsers) {
+                    $filteredIncludeUsers = @($currentIncludeUsers | Where-Object {
+                        $_ -ne "All" -and $_ -ne "None" -and
+                        $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$"
+                    })
+                }
+
                 # Remove selected indices
                 $indicesToRemove = @()
                 foreach ($index in $includedListBox.SelectedIndices) {
                     $indicesToRemove += $index
                 }
-                
+
                 $newIncludeList = @()
-                $userList = ($currentIncludeUsers | Where-Object { $_ -ne "All" })
-                for ($i = 0; $i -lt $userList.Count; $i++) {
+                for ($i = 0; $i -lt $filteredIncludeUsers.Count; $i++) {
                     if ($i -notin $indicesToRemove) {
-                        $newIncludeList += $userList[$i]
+                        $newIncludeList += $filteredIncludeUsers[$i]
                     }
                 }
-                
+
                 # If no users left, we need at least something or the policy will be invalid
                 if ($newIncludeList.Count -eq 0) {
                     $confirmEmpty = [System.Windows.Forms.MessageBox]::Show("This will remove all specific users. The policy may become invalid without any included users or groups. Continue?", "Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -2018,14 +2082,23 @@ function Show-ManageIncludedUsersDialog {
                         return
                     }
                 }
-                
+
+                # Also filter ExcludeUsers
+                $newExcludeList = @()
+                if ($currentExcludeUsers) {
+                    $newExcludeList = @($currentExcludeUsers | Where-Object {
+                        $_ -ne "All" -and $_ -ne "None" -and
+                        $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$"
+                    })
+                }
+
                 $userConditions = @{
                     IncludeUsers = $newIncludeList
-                    ExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+                    ExcludeUsers = $newExcludeList
                 }
-                
+
                 Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
-                
+
                 [System.Windows.Forms.MessageBox]::Show("Users removed successfully!", "Success")
                 Refresh-IncludedUsers
             } catch {
