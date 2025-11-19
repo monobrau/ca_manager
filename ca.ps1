@@ -2598,36 +2598,42 @@ function Show-UserPickerDialog {
         }
     })
 
-    # Show the form first
-    $form.Show()
-    [System.Windows.Forms.Application]::DoEvents()
+    # Use a timer to load users after form is shown to avoid freezing
+    $loadTimer = New-Object System.Windows.Forms.Timer
+    $loadTimer.Interval = 100  # 100ms delay
+    $loadTimer.Add_Tick({
+        $loadTimer.Stop()
+        $loadTimer.Dispose()
 
-    # Load users directly (no background job to avoid freezing)
-    try {
-        Write-Host "Loading users for picker dialog..." -ForegroundColor Cyan
-        $statusLabel.Text = "Loading users from tenant..."
-        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            Write-Host "Loading users for picker dialog..." -ForegroundColor Cyan
+            $statusLabel.Text = "Loading users from tenant..."
+            [System.Windows.Forms.Application]::DoEvents()
 
-        $allUsers = @(Get-MgUser -All -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id)
+            $allUsers = @(Get-MgUser -All -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id)
 
-        $statusLabel.Text = "Loaded $($allUsers.Count) users. You can now search and select."
-        [System.Windows.Forms.Application]::DoEvents()
+            $statusLabel.Text = "Loaded $($allUsers.Count) users. You can now search and select."
+            [System.Windows.Forms.Application]::DoEvents()
 
-        Write-Host "Loaded $($allUsers.Count) users" -ForegroundColor Green
+            Write-Host "Loaded $($allUsers.Count) users" -ForegroundColor Green
 
-        foreach ($user in $allUsers) {
-            $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
-            $item.SubItems.Add($user.UserPrincipalName) | Out-Null
-            $item.SubItems.Add($user.Id) | Out-Null
-            $item.Tag = $user
-            $listView.Items.Add($item) | Out-Null
+            $listView.BeginUpdate()
+            foreach ($user in $allUsers) {
+                $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+                $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+                $item.SubItems.Add($user.Id) | Out-Null
+                $item.Tag = $user
+                $listView.Items.Add($item) | Out-Null
+            }
+            $listView.EndUpdate()
+        } catch {
+            $statusLabel.Text = "Error loading users: $($_.Exception.Message)"
+            Write-Host "Error loading users: $_" -ForegroundColor Red
         }
-    } catch {
-        $statusLabel.Text = "Error loading users: $($_.Exception.Message)"
-        Write-Host "Error loading users: $_" -ForegroundColor Red
-    }
+    })
+    $loadTimer.Start()
 
-    # Wait for user to interact
+    # Show dialog and wait for user interaction
     $null = $form.ShowDialog()
     return $selectedUsers
 }
