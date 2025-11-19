@@ -58,9 +58,12 @@ function Connect-GraphAPI {
     
     $requiredScopes = @(
         "Policy.Read.All",
-        "Policy.ReadWrite.ConditionalAccess", 
+        "Policy.ReadWrite.ConditionalAccess",
         "User.Read.All",
+        "User.ReadWrite.All",
         "Group.Read.All",
+        "Group.ReadWrite.All",
+        "Directory.Read.All",
         "Organization.Read.All"
     )
 
@@ -2595,25 +2598,36 @@ function Show-UserPickerDialog {
         }
     })
 
-    # Load users in background
-    $job = Start-Job -ScriptBlock {
-        Import-Module Microsoft.Graph.Users
-        Get-MgUser -All | Select-Object DisplayName,UserPrincipalName,Id
-    }
-    while (-not $job.HasExited) {
-        Start-Sleep -Milliseconds 200
+    # Show the form first
+    $form.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+
+    # Load users directly (no background job to avoid freezing)
+    try {
+        Write-Host "Loading users for picker dialog..." -ForegroundColor Cyan
+        $statusLabel.Text = "Loading users from tenant..."
         [System.Windows.Forms.Application]::DoEvents()
+
+        $allUsers = @(Get-MgUser -All -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id)
+
+        $statusLabel.Text = "Loaded $($allUsers.Count) users. You can now search and select."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Write-Host "Loaded $($allUsers.Count) users" -ForegroundColor Green
+
+        foreach ($user in $allUsers) {
+            $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+            $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+            $item.SubItems.Add($user.Id) | Out-Null
+            $item.Tag = $user
+            $listView.Items.Add($item) | Out-Null
+        }
+    } catch {
+        $statusLabel.Text = "Error loading users: $($_.Exception.Message)"
+        Write-Host "Error loading users: $_" -ForegroundColor Red
     }
-    $allUsers = Receive-Job $job
-    Remove-Job $job
-    $statusLabel.Text = "Loaded $($allUsers.Count) users."
-    foreach ($user in $allUsers) {
-        $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
-        $item.SubItems.Add($user.UserPrincipalName) | Out-Null
-        $item.SubItems.Add($user.Id) | Out-Null
-        $item.Tag = $user
-        $listView.Items.Add($item) | Out-Null
-    }
-    $form.ShowDialog() | Out-Null
+
+    # Wait for user to interact
+    $null = $form.ShowDialog()
     return $selectedUsers
 }
