@@ -910,12 +910,14 @@ function Show-CountryLocationDialog {
     # Pre-populate if editing
     if ($ExistingLocation -and $Mode -eq "Edit") {
         $nameTextBox.Text = $ExistingLocation.DisplayName
-        
+
         $countries = $ExistingLocation.AdditionalProperties['countriesAndRegions']
         if ($countries) {
             $countriesTextBox.Text = ($countries -join ', ')
+            # Store original countries for comparison
+            $countriesTextBox.Tag = $countries -join ','
         }
-        
+
         $includeUnknown = $ExistingLocation.AdditionalProperties['includeUnknownCountriesAndRegions']
         if ($includeUnknown) {
             $includeUnknownCheckBox.Checked = $includeUnknown
@@ -942,23 +944,74 @@ function Show-CountryLocationDialog {
             $success = $false
             
             if ($Mode -eq "Edit") {
-                # Update existing location using PATCH
-                $updateBody = @{
-                    displayName = $nameTextBox.Text
-                    countriesAndRegions = $countryCodes
-                    includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
-                } | ConvertTo-Json -Depth 10
-                
-                Write-Host ("Updating location " + $ExistingLocation.Id + " with: " + $updateBody) -ForegroundColor Cyan
-                $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
-                $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $updateBody -ContentType "application/json"
-                Write-Host ("Update response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
-                $success = $true
-                [System.Windows.Forms.MessageBox]::Show("Named Location updated successfully!", "Success")
+                # Compare original and new countries to determine update strategy
+                $originalCountries = @()
+                if ($countriesTextBox.Tag) {
+                    $originalCountries = $countriesTextBox.Tag.Split(',') | ForEach-Object { $_.Trim().ToUpper() }
+                }
+                $originalCountries = $originalCountries | Where-Object { $_ -ne "" }
+
+                # Check if countries have changed
+                $countriesChanged = ($originalCountries.Count -ne $countryCodes.Count) -or ($null -ne (Compare-Object $originalCountries $countryCodes -SyncWindow 0))
+
+                if ($countriesChanged) {
+                    # Microsoft Graph doesn't allow changing countries - must DELETE and recreate
+                    $msg = "Microsoft Graph does not allow changing the countries of an existing country named location.`n`n" +
+                           "This operation will DELETE the existing location and create a new one with the new countries.`n`n" +
+                           "Any Conditional Access policies referencing the old location will need to be updated to use the new one (ID will change).`n`n" +
+                           "Proceed?"
+                    $result = [System.Windows.Forms.MessageBox]::Show($msg, "Recreate Named Location", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                    if ($result -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+                    # Delete old location
+                    $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
+                    Write-Host "DELETE URI: $uri" -ForegroundColor Yellow
+                    Invoke-MgGraphRequest -Method DELETE -Uri $uri
+
+                    # Create new location
+                    $createParams = @{
+                        "@odata.type" = "#microsoft.graph.countryNamedLocation"
+                        displayName = $nameTextBox.Text
+                        countriesAndRegions = $countryCodes
+                        includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
+                    }
+                    $jsonBody = $createParams | ConvertTo-Json -Depth 10
+                    Write-Host "POST URI: https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations" -ForegroundColor Yellow
+                    Write-Host "POST BODY: $jsonBody" -ForegroundColor Yellow
+                    $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
+                    $response = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $jsonBody -ContentType "application/json"
+
+                    [System.Windows.Forms.MessageBox]::Show("Named Location deleted and recreated successfully!`n`nRemember to update any Conditional Access policies that referenced the old location.", "Success")
+                    $success = $true
+                } else {
+                    # Only PATCH changed fields (displayName, includeUnknownCountriesAndRegions)
+                    $updateBody = @{}
+                    if ($nameTextBox.Text -ne $ExistingLocation.DisplayName) {
+                        $updateBody["displayName"] = $nameTextBox.Text
+                    }
+                    $existingUnknown = $ExistingLocation.AdditionalProperties['includeUnknownCountriesAndRegions']
+                    if ($includeUnknownCheckBox.Checked -ne $existingUnknown) {
+                        $updateBody["includeUnknownCountriesAndRegions"] = $includeUnknownCheckBox.Checked
+                    }
+                    if ($updateBody.Count -eq 0) {
+                        [System.Windows.Forms.MessageBox]::Show("No changes to update.", "No Changes")
+                        return
+                    }
+
+                    $jsonBody = $updateBody | ConvertTo-Json -Depth 10
+                    Write-Host "PATCH URI: https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/$($ExistingLocation.Id)" -ForegroundColor Yellow
+                    Write-Host "PATCH BODY: $jsonBody" -ForegroundColor Yellow
+                    $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
+                    $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $jsonBody -ContentType "application/json"
+                    Write-Host ("Update response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
+
+                    [System.Windows.Forms.MessageBox]::Show("Named Location updated successfully!", "Success")
+                    $success = $true
+                }
             } else {
                 # Create new location using REST API
                 $createParams = @{
-                    "odata.type" = "#microsoft.graph.countryNamedLocation"
+                    "@odata.type" = "#microsoft.graph.countryNamedLocation"
                     displayName = $nameTextBox.Text
                     countriesAndRegions = $countryCodes
                     includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked

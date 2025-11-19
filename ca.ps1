@@ -892,11 +892,12 @@ function Show-CountryLocationDialog {
                     [System.Windows.Forms.MessageBox]::Show("No changes to update.", "No Changes")
                     return
                 }
+                $jsonBody = $updateBody | ConvertTo-Json -Depth 10
                 Write-Host "PATCH URI: https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/$($ExistingLocation.Id)" -ForegroundColor Yellow
-                Write-Host "PATCH BODY: $($updateBody | ConvertTo-Json -Depth 10)" -ForegroundColor Yellow
+                Write-Host "PATCH BODY: $jsonBody" -ForegroundColor Yellow
                 try {
                     $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
-                    $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $updateBody -ContentType "application/json"
+                    $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $jsonBody -ContentType "application/json"
                 } catch {
                     Write-Host "PATCH ERROR: $($_.Exception.Message)" -ForegroundColor Red
                     Write-Host "PATCH ERROR DETAILS: $($_ | Out-String)" -ForegroundColor Red
@@ -910,42 +911,9 @@ function Show-CountryLocationDialog {
                 Refresh-NamedLocationsList $listView
                 return
             }
-        }
-
-        try {
-            $countryCodes = $countriesTextBox.Text.Split(',') | ForEach-Object { [string]$_.Trim().ToUpper() }
-            # Remove empty entries
-            $countryCodes = $countryCodes | Where-Object { $_ -ne "" }
-            # Validate: must be exactly 2 uppercase letters
-            $invalidCodes = $countryCodes | Where-Object { $_ -notmatch '^[A-Z]{2}$' }
-            if ($invalidCodes.Count -gt 0) {
-                [System.Windows.Forms.MessageBox]::Show("Invalid country code(s): " + ($invalidCodes -join ', ') + "`n`nPlease enter only valid 2-letter country codes (e.g., US, CA, GB).", "Invalid Country Codes")
-                return
-            }
-            if ($countryCodes.Count -eq 0) {
-                [System.Windows.Forms.MessageBox]::Show("Please enter at least one valid 2-letter country code.", "Validation Error")
-                return
-            }
-            # Ensure $countryCodes is always a .NET string array
-            $countryCodes = @($countryCodes | ForEach-Object { [string]$_ })
-            $countryCodes = [string[]]$countryCodes
-            $success = $false
-            
-            if ($Mode -eq "Edit") {
-                # PATCH: Do NOT include @odata.type
-                $updateBody = @{
-                    displayName = $nameTextBox.Text
-                    countriesAndRegions = $countryCodes
-                    includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
-                }
-                Write-Host ("Updating location " + $ExistingLocation.Id + " with: " + ($updateBody | ConvertTo-Json -Depth 10)) -ForegroundColor Cyan
-                $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
-                $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $updateBody -ContentType "application/json"
-                Write-Host ("Update response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
-                $success = $true
-                [System.Windows.Forms.MessageBox]::Show("Named Location updated successfully!", "Success")
-            } else {
-                # POST: Include @odata.type
+        } else {
+            # Create mode - POST new location
+            try {
                 $createParams = @{
                     "@odata.type" = "#microsoft.graph.countryNamedLocation"
                     displayName = $nameTextBox.Text
@@ -957,33 +925,28 @@ function Show-CountryLocationDialog {
                 $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
                 $response = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $jsonBody -ContentType "application/json"
                 Write-Host ("Create response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
-                $success = $true
                 [System.Windows.Forms.MessageBox]::Show("Named Location created successfully!", "Success")
-            }
-            
-            if ($success) {
                 $form.Close()
-                # Small delay to allow Microsoft Graph to process the changes
                 Start-Sleep -Seconds 1
                 Refresh-NamedLocationsList $listView
+            } catch {
+                $errorMessage = "Error creating Named Location:`n`n"
+                $errorMessage += "Error: " + $_.Exception.Message + "`n`n"
+                $errorMessage += "Settings:`n"
+                $errorMessage += "- Name: " + $nameTextBox.Text + "`n"
+                $errorMessage += "- Countries: " + ($countryCodes -join ', ') + "`n"
+                $errorMessage += "- Include Unknown: " + $includeUnknownCheckBox.Checked + "`n`n"
+
+                if ($_.Exception.Message -like "*BadRequest*") {
+                    $errorMessage += "Common fixes:`n"
+                    $errorMessage += "* Use valid 2-letter country codes: US, CA, GB, DE, FR`n"
+                    $errorMessage += "* Remove special characters from display name`n"
+                    $errorMessage += "* Ensure you have the required permissions"
+                }
+
+                Write-Host ("ERROR: " + $errorMessage) -ForegroundColor Red
+                [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error Details")
             }
-        } catch {
-            $errorMessage = "Error processing Named Location:`n`n"
-            $errorMessage += "Error: " + $_.Exception.Message + "`n`n"
-            $errorMessage += "Settings:`n"
-            $errorMessage += "- Name: " + $nameTextBox.Text + "`n"
-            $errorMessage += "- Countries: " + ($countryCodes -join ', ') + "`n"
-            $errorMessage += "- Include Unknown: " + $includeUnknownCheckBox.Checked + "`n`n"
-            
-            if ($_.Exception.Message -like "*BadRequest*") {
-                $errorMessage += "Common fixes:`n"
-                $errorMessage += "* Use valid 2-letter country codes: US, CA, GB, DE, FR`n"
-                $errorMessage += "* Remove special characters from display name`n"
-                $errorMessage += "* Ensure you have the required permissions"
-            }
-            
-            Write-Host ("ERROR: " + $errorMessage) -ForegroundColor Red
-            [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error Details")
         }
     })
     $form.Controls.Add($actionButton)
