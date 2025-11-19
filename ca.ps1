@@ -2557,23 +2557,25 @@ function Show-UserPickerDialog {
     $cancelButton.Add_Click({ $form.Close() })
     $form.Controls.Add($cancelButton)
 
-    $selectedUsers = @()
-    $allUsers = @()
-    $filteredUsers = @()
+    # Use script-level variables for proper scoping across event handlers
+    $script:pickerSelectedUsers = @()
+    $script:pickerAllUsers = @()
 
     $okButton.Add_Click({
-        $selectedUsers = @()
+        $script:pickerSelectedUsers = @()
         foreach ($item in $listView.SelectedItems) {
-            $selectedUsers += $item.Tag
+            $script:pickerSelectedUsers += $item.Tag
         }
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $form.Close()
     })
 
     $searchBox.Add_TextChanged({
         $query = $searchBox.Text.Trim().ToLower()
+        $listView.BeginUpdate()
         $listView.Items.Clear()
         if ([string]::IsNullOrWhiteSpace($query)) {
-            foreach ($user in $allUsers) {
+            foreach ($user in $script:pickerAllUsers) {
                 $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
                 $item.SubItems.Add($user.UserPrincipalName) | Out-Null
                 $item.SubItems.Add($user.Id) | Out-Null
@@ -2581,7 +2583,7 @@ function Show-UserPickerDialog {
                 $listView.Items.Add($item) | Out-Null
             }
         } else {
-            foreach ($user in $allUsers | Where-Object { $_.DisplayName -like "*$query*" -or $_.UserPrincipalName -like "*$query*" }) {
+            foreach ($user in $script:pickerAllUsers | Where-Object { $_.DisplayName -like "*$query*" -or $_.UserPrincipalName -like "*$query*" }) {
                 $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
                 $item.SubItems.Add($user.UserPrincipalName) | Out-Null
                 $item.SubItems.Add($user.Id) | Out-Null
@@ -2589,6 +2591,7 @@ function Show-UserPickerDialog {
                 $listView.Items.Add($item) | Out-Null
             }
         }
+        $listView.EndUpdate()
     })
 
     $listView.Add_SelectedIndexChanged({
@@ -2614,15 +2617,15 @@ function Show-UserPickerDialog {
             $statusLabel.Text = "Loading users from tenant..."
             [System.Windows.Forms.Application]::DoEvents()
 
-            $allUsers = @(Get-MgUser -All -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id)
+            $script:pickerAllUsers = @(Get-MgUser -All -Property DisplayName,UserPrincipalName,Id | Select-Object DisplayName,UserPrincipalName,Id)
 
-            $statusLabel.Text = "Loaded $($allUsers.Count) users. You can now search and select."
+            $statusLabel.Text = "Loaded $($script:pickerAllUsers.Count) users. You can now search and select."
             [System.Windows.Forms.Application]::DoEvents()
 
-            Write-Host "Loaded $($allUsers.Count) users" -ForegroundColor Green
+            Write-Host "Loaded $($script:pickerAllUsers.Count) users" -ForegroundColor Green
 
             $listView.BeginUpdate()
-            foreach ($user in $allUsers) {
+            foreach ($user in $script:pickerAllUsers) {
                 $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
                 $item.SubItems.Add($user.UserPrincipalName) | Out-Null
                 $item.SubItems.Add($user.Id) | Out-Null
@@ -2638,6 +2641,14 @@ function Show-UserPickerDialog {
     $loadTimer.Start()
 
     # Show dialog and wait for user interaction
-    $null = $form.ShowDialog()
-    return $selectedUsers
+    $dialogResult = $form.ShowDialog()
+
+    # Return selected users if OK was clicked, otherwise return empty array
+    if ($dialogResult -eq [System.Windows.Forms.DialogResult]::OK) {
+        Write-Host "User picker returned $($script:pickerSelectedUsers.Count) users" -ForegroundColor Green
+        return $script:pickerSelectedUsers
+    } else {
+        Write-Host "User picker cancelled" -ForegroundColor Yellow
+        return @()
+    }
 }
