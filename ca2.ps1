@@ -1908,14 +1908,8 @@ function Show-ManageUserExceptionsDialog {
                 }
             }
 
-            # Filter IncludeUsers to only keep GUIDs (no special values)
-            $newIncludeList = @()
-            if ($currentIncludeUsers) {
-                $newIncludeList = @($currentIncludeUsers | Where-Object { $_ -ne "All" -and $_ -ne "None" -and $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$" })
-            }
-
             $userConditions = @{
-                IncludeUsers = $newIncludeList
+                IncludeUsers = $currentIncludeUsers
                 ExcludeUsers = $newExcludeList
             }
 
@@ -1968,14 +1962,8 @@ function Show-ManageUserExceptionsDialog {
                     }
                 }
 
-                # Filter IncludeUsers to only keep GUIDs (no special values)
-                $newIncludeList = @()
-                if ($currentIncludeUsers) {
-                    $newIncludeList = @($currentIncludeUsers | Where-Object { $_ -ne "All" -and $_ -ne "None" -and $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$" })
-                }
-
                 $userConditions = @{
-                    IncludeUsers = $newIncludeList
+                    IncludeUsers = $currentIncludeUsers
                     ExcludeUsers = $newExcludeList
                 }
 
@@ -2024,14 +2012,8 @@ function Show-ManageUserExceptionsDialog {
                     }
                 }
 
-                # Filter IncludeUsers to only keep GUIDs (no special values)
-                $newIncludeList = @()
-                if ($currentIncludeUsers) {
-                    $newIncludeList = @($currentIncludeUsers | Where-Object { $_ -ne "All" -and $_ -ne "None" -and $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$" })
-                }
-
                 $userConditions = @{
-                    IncludeUsers = $newIncludeList
+                    IncludeUsers = $currentIncludeUsers
                     ExcludeUsers = $newExcludeList
                 }
 
@@ -2168,15 +2150,9 @@ function Show-ManageIncludedUsersDialog {
                 }
             }
 
-            # Filter ExcludeUsers to only keep GUIDs (no special values)
-            $newExcludeList = @()
-            if ($currentExcludeUsers) {
-                $newExcludeList = @($currentExcludeUsers | Where-Object { $_ -ne "All" -and $_ -ne "None" -and $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$" })
-            }
-
             $userConditions = @{
                 IncludeUsers = $newIncludeList
-                ExcludeUsers = $newExcludeList
+                ExcludeUsers = $currentExcludeUsers
             }
 
             Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
@@ -2228,15 +2204,9 @@ function Show-ManageIncludedUsersDialog {
                     }
                 }
 
-                # Filter ExcludeUsers to only keep GUIDs (no special values)
-                $newExcludeList = @()
-                if ($currentExcludeUsers) {
-                    $newExcludeList = @($currentExcludeUsers | Where-Object { $_ -ne "All" -and $_ -ne "None" -and $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$" })
-                }
-
                 $userConditions = @{
                     IncludeUsers = $newIncludeList
-                    ExcludeUsers = $newExcludeList
+                    ExcludeUsers = $currentExcludeUsers
                 }
 
                 Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
@@ -2292,15 +2262,9 @@ function Show-ManageIncludedUsersDialog {
                     }
                 }
 
-                # Filter ExcludeUsers to only keep GUIDs (no special values)
-                $newExcludeList = @()
-                if ($currentExcludeUsers) {
-                    $newExcludeList = @($currentExcludeUsers | Where-Object { $_ -ne "All" -and $_ -ne "None" -and $_ -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$" })
-                }
-
                 $userConditions = @{
                     IncludeUsers = $newIncludeList
-                    ExcludeUsers = $newExcludeList
+                    ExcludeUsers = $currentExcludeUsers
                 }
 
                 Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
