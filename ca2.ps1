@@ -1876,9 +1876,45 @@ function Show-ManageUserExceptionsDialog {
     $addTextBox.Size = New-Object System.Drawing.Size(450, 100)
     $form.Controls.Add($addTextBox)
 
+    # Browse button to pick users from a dialog
+    $browseButton = New-Object System.Windows.Forms.Button
+    $browseButton.Text = "Browse Users"
+    $browseButton.Location = New-Object System.Drawing.Point(470, 235)
+    $browseButton.Size = New-Object System.Drawing.Size(100, 30)
+    $browseButton.Add_Click({
+        $pickedUsers = Show-UserPickerDialog -Title "Select Users to Exclude"
+        if (-not $pickedUsers -or $pickedUsers.Count -eq 0) { return }
+        try {
+            $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
+            $currentExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+            $newExcludeList = @()
+
+            if ($currentExcludeUsers) { $newExcludeList += $currentExcludeUsers }
+
+            foreach ($user in $pickedUsers) {
+                if ($user.Id -notin $newExcludeList) {
+                    $newExcludeList += $user.Id
+                }
+            }
+
+            $userConditions = @{
+                IncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+                ExcludeUsers = $newExcludeList
+            }
+
+            Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
+
+            [System.Windows.Forms.MessageBox]::Show("Users added successfully!", "Success")
+            Refresh-ExcludedUsers
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Error adding users: $_", "Error")
+        }
+    })
+    $form.Controls.Add($browseButton)
+
     $addButton = New-Object System.Windows.Forms.Button
-    $addButton.Text = "Add Users"
-    $addButton.Location = New-Object System.Drawing.Point(470, 235)
+    $addButton.Text = "Add from Text"
+    $addButton.Location = New-Object System.Drawing.Point(470, 275)
     $addButton.Size = New-Object System.Drawing.Size(100, 30)
     $addButton.Add_Click({
         $userInputs = $addTextBox.Text.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
@@ -1931,7 +1967,7 @@ function Show-ManageUserExceptionsDialog {
     # Remove button
     $removeButton = New-Object System.Windows.Forms.Button
     $removeButton.Text = "Remove Selected"
-    $removeButton.Location = New-Object System.Drawing.Point(470, 275)
+    $removeButton.Location = New-Object System.Drawing.Point(470, 315)
     $removeButton.Size = New-Object System.Drawing.Size(100, 30)
     $removeButton.Add_Click({
         if ($excludedListBox.SelectedItems.Count -eq 0) {
@@ -2046,11 +2082,13 @@ function Show-ManageIncludedUsersDialog {
         if ($allUsersCheckBox.Checked) {
             $includedListBox.Enabled = $false
             $addTextBox.Enabled = $false
+            $browseButton.Enabled = $false
             $addButton.Enabled = $false
             $removeButton.Enabled = $false
         } else {
             $includedListBox.Enabled = $true
             $addTextBox.Enabled = $true
+            $browseButton.Enabled = $true
             $addButton.Enabled = $true
             $removeButton.Enabled = $true
         }
@@ -2069,9 +2107,48 @@ function Show-ManageIncludedUsersDialog {
     $addTextBox.Size = New-Object System.Drawing.Size(450, 100)
     $form.Controls.Add($addTextBox)
 
+    # Browse button to pick users from a dialog
+    $browseButton = New-Object System.Windows.Forms.Button
+    $browseButton.Text = "Browse Users"
+    $browseButton.Location = New-Object System.Drawing.Point(470, 265)
+    $browseButton.Size = New-Object System.Drawing.Size(100, 30)
+    $browseButton.Add_Click({
+        $pickedUsers = Show-UserPickerDialog -Title "Select Users to Include"
+        if (-not $pickedUsers -or $pickedUsers.Count -eq 0) { return }
+        try {
+            $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
+            $currentIncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
+            $newIncludeList = @()
+
+            # Don't include "All" in the specific user list
+            if ($currentIncludeUsers) {
+                $newIncludeList += ($currentIncludeUsers | Where-Object { $_ -ne "All" })
+            }
+
+            foreach ($user in $pickedUsers) {
+                if ($user.Id -notin $newIncludeList) {
+                    $newIncludeList += $user.Id
+                }
+            }
+
+            $userConditions = @{
+                IncludeUsers = $newIncludeList
+                ExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+            }
+
+            Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
+
+            [System.Windows.Forms.MessageBox]::Show("Users added successfully!", "Success")
+            Refresh-IncludedUsers
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Error adding users: $_", "Error")
+        }
+    })
+    $form.Controls.Add($browseButton)
+
     $addButton = New-Object System.Windows.Forms.Button
-    $addButton.Text = "Add Users"
-    $addButton.Location = New-Object System.Drawing.Point(470, 265)
+    $addButton.Text = "Add from Text"
+    $addButton.Location = New-Object System.Drawing.Point(470, 305)
     $addButton.Size = New-Object System.Drawing.Size(100, 30)
     $addButton.Add_Click({
         $userInputs = $addTextBox.Text.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
@@ -2127,7 +2204,7 @@ function Show-ManageIncludedUsersDialog {
     # Remove button
     $removeButton = New-Object System.Windows.Forms.Button
     $removeButton.Text = "Remove Selected"
-    $removeButton.Location = New-Object System.Drawing.Point(470, 305)
+    $removeButton.Location = New-Object System.Drawing.Point(470, 345)
     $removeButton.Size = New-Object System.Drawing.Size(100, 30)
     $removeButton.Add_Click({
         if ($includedListBox.SelectedItems.Count -eq 0) {
