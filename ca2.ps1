@@ -2312,21 +2312,23 @@ function Show-ManageIncludedUsersDialog {
         $includedListBox.Items.Clear()
         $currentPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
         $includeUsers = $currentPolicy.Conditions.Users.IncludeUsers
-        
+
         if ($includeUsers -contains "All") {
             $allUsersCheckBox.Checked = $true
             # Disable other controls when "All" is selected
             $includedListBox.Enabled = $false
             $addTextBox.Enabled = $false
+            $browseButton.Enabled = $false
             $addButton.Enabled = $false
             $removeButton.Enabled = $false
         } else {
             $allUsersCheckBox.Checked = $false
             $includedListBox.Enabled = $true
             $addTextBox.Enabled = $true
+            $browseButton.Enabled = $true
             $addButton.Enabled = $true
             $removeButton.Enabled = $true
-            
+
             if ($includeUsers) {
                 $specificUsers = $includeUsers | Where-Object { $_ -ne "All" }
                 if ($specificUsers) {
