@@ -1999,6 +1999,10 @@ function Show-ManageIncludedUsersDialog {
             $currentIncludeUsers = $currentPolicy.Conditions.Users.IncludeUsers
             $currentExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
 
+            Write-Host "DEBUG: Current IncludeUsers: $($currentIncludeUsers -join ', ')" -ForegroundColor Cyan
+            Write-Host "DEBUG: Current ExcludeUsers: $($currentExcludeUsers -join ', ')" -ForegroundColor Cyan
+            Write-Host "DEBUG: Picked users count: $($pickedUsers.Count)" -ForegroundColor Cyan
+
             # Filter out special values (All, None) - only keep GUIDs
             $newIncludeList = @()
             if ($currentIncludeUsers) {
@@ -2022,6 +2026,9 @@ function Show-ManageIncludedUsersDialog {
                 })
             }
 
+            Write-Host "DEBUG: New IncludeUsers: $($newIncludeList -join ', ')" -ForegroundColor Yellow
+            Write-Host "DEBUG: New ExcludeUsers: $($newExcludeList -join ', ')" -ForegroundColor Yellow
+
             $userConditions = @{
                 IncludeUsers = $newIncludeList
                 ExcludeUsers = $newExcludeList
@@ -2031,6 +2038,7 @@ function Show-ManageIncludedUsersDialog {
             Refresh-IncludedUsers
         } catch {
             [System.Windows.Forms.MessageBox]::Show("Error adding users: $_", "Error")
+            Write-Host "DEBUG ERROR: $_" -ForegroundColor Red
         }
     })
     $form.Controls.Add($addButton)
