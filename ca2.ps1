@@ -317,21 +317,24 @@ function Update-ConnectionUI {
 
 function Get-UserDisplayInfo {
     param([string[]]$UserIds)
-    
+
     $userInfo = @()
     foreach ($userId in $UserIds) {
         if ($userId -eq "All") {
             $userInfo += "All Users"
         } else {
             try {
-                $user = Get-MgUser -UserId $userId -ErrorAction SilentlyContinue
-                if ($user) {
+                $user = Get-MgUser -UserId $userId -Property DisplayName,UserPrincipalName,Id -ErrorAction SilentlyContinue
+                if ($user -and $user.DisplayName) {
                     $userInfo += "$($user.DisplayName) ($($user.UserPrincipalName))"
+                } elseif ($user -and $user.UserPrincipalName) {
+                    $userInfo += "$($user.UserPrincipalName)"
                 } else {
                     $userInfo += "Unknown User [$userId]"
                 }
             } catch {
-                $userInfo += "Error retrieving user [$userId]"
+                Write-Host "Error retrieving user $userId : $_" -ForegroundColor Yellow
+                $userInfo += "Unknown User [$userId]"
             }
         }
     }
@@ -340,31 +343,31 @@ function Get-UserDisplayInfo {
 
 function Resolve-UserInput {
     param([string[]]$UserInputs)
-    
+
     $resolvedUserIds = @()
     $notFoundUsers = @()
-    
+
     foreach ($input in $UserInputs) {
         $input = $input.Trim()
         if ([string]::IsNullOrWhiteSpace($input)) { continue }
-        
+
         try {
             # Check if it is a GUID (User ID)
             if ($input -match "^[{]?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}[}]?$") {
-                $user = Get-MgUser -UserId $input -ErrorAction SilentlyContinue
+                $user = Get-MgUser -UserId $input -Property Id,DisplayName,UserPrincipalName -ErrorAction SilentlyContinue
                 if ($user) {
-                    $resolvedUserIds += $input
+                    $resolvedUserIds += $user.Id
                 } else {
                     $notFoundUsers += $input
                 }
             } else {
                 # Try as email or display name
-                $user = Get-MgUser -Filter "userPrincipalName eq '$input'" -ErrorAction SilentlyContinue
-                
+                $user = Get-MgUser -Filter "userPrincipalName eq '$input'" -Property Id,DisplayName,UserPrincipalName -ErrorAction SilentlyContinue
+
                 if (-not $user) {
-                    $user = Get-MgUser -Filter "displayName eq '$input'" -ErrorAction SilentlyContinue
+                    $user = Get-MgUser -Filter "displayName eq '$input'" -Property Id,DisplayName,UserPrincipalName -ErrorAction SilentlyContinue
                 }
-                
+
                 if ($user) {
                     $resolvedUserIds += $user.Id
                 } else {
@@ -372,10 +375,11 @@ function Resolve-UserInput {
                 }
             }
         } catch {
+            Write-Host "Error resolving user '$input': $_" -ForegroundColor Yellow
             $notFoundUsers += $input
         }
     }
-    
+
     return @{
         ResolvedUserIds = $resolvedUserIds
         NotFoundUsers = $notFoundUsers
