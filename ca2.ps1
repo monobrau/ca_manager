@@ -2254,12 +2254,13 @@ function Show-ManageIncludedUsersDialog {
                     }
                 }
 
-                # If no users left, we need at least something or the policy will be invalid
+                # If no users left, set to "None" (required by Graph API)
                 if ($newIncludeList.Count -eq 0) {
-                    $confirmEmpty = [System.Windows.Forms.MessageBox]::Show("This will remove all specific users. The policy may become invalid without any included users or groups. Continue?", "Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                    $confirmEmpty = [System.Windows.Forms.MessageBox]::Show("This will remove all specific users and set to 'None'. Continue?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
                     if ($confirmEmpty -eq [System.Windows.Forms.DialogResult]::No) {
                         return
                     }
+                    $newIncludeList = @("None")
                 }
 
                 $userConditions = @{
