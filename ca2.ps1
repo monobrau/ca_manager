@@ -62,12 +62,66 @@ try {
 }
 
 # Check for Microsoft Graph module
-if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
-    Write-Error "Microsoft.Graph module not installed."
-    Write-Host "Please run: Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
-    exit
+Write-Host "Checking for Microsoft.Graph module..." -ForegroundColor Cyan
+$graphModule = Get-Module -ListAvailable -Name Microsoft.Graph
+if (-not $graphModule) {
+    # Try alternative check - sometimes modules are installed but not in the expected location
+    $allModules = Get-Module -ListAvailable | Where-Object { $_.Name -like "Microsoft.Graph*" }
+    if ($allModules.Count -eq 0) {
+        Write-Host ""
+        Write-Host "ERROR: Microsoft.Graph module not installed." -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Please install it by running the following command in PowerShell:" -ForegroundColor Yellow
+        Write-Host "  Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Or for all users (requires admin):" -ForegroundColor Yellow
+        Write-Host "  Install-Module Microsoft.Graph -Scope AllUsers" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Note: This may take several minutes as it installs multiple sub-modules." -ForegroundColor Yellow
+        Write-Host ""
+        Read-Host "Press Enter to exit"
+        exit
+    } else {
+        Write-Host "Found Microsoft.Graph sub-modules, but main module not detected." -ForegroundColor Yellow
+        Write-Host "Attempting to import required modules..." -ForegroundColor Cyan
+    }
 }
+
+# Check for required sub-modules
+$requiredModules = @(
+    "Microsoft.Graph.Identity.SignIns",
+    "Microsoft.Graph.Users"
+)
+$missingModules = @()
+foreach ($moduleName in $requiredModules) {
+    $module = Get-Module -ListAvailable -Name $moduleName
+    if (-not $module) {
+        $missingModules += $moduleName
+    } else {
+        Write-Host "  Found: $moduleName" -ForegroundColor Green
+    }
+}
+
+if ($missingModules.Count -gt 0) {
+    Write-Host ""
+    Write-Host "WARNING: Some required Microsoft.Graph sub-modules are missing:" -ForegroundColor Yellow
+    foreach ($module in $missingModules) {
+        Write-Host "  - $module" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "Please install them by running:" -ForegroundColor Yellow
+    Write-Host "  Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "This will install all required sub-modules." -ForegroundColor Yellow
+    Write-Host ""
+    $continue = Read-Host "Continue anyway? (y/n)"
+    if ($continue -ne "y" -and $continue -ne "Y") {
+        exit
+    }
+} else {
+    Write-Host "All required modules found." -ForegroundColor Green
+}
+Write-Host ""
 
 # PowerShell Core compatible InputBox function
 function Show-InputBox {
