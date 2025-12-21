@@ -1889,18 +1889,19 @@ function Create-GeoIpExceptionForPolicy {
     $usersTextBox.Size = New-Object System.Drawing.Size(680, 120)
     $form.Controls.Add($usersTextBox)
 
-    # Helper to seed UI from selected location
-    $updateLocationUi = {
-        if ($locationListBox.SelectedItem -and $locationListBox.SelectedItem.Data) {
-            $locData = $locationListBox.SelectedItem.Data
-            $countriesTextBox.Text = ($locData.Countries -join ', ')
-            $includeUnknownCheckbox.Checked = $locData.IncludeUnknown
-            $locNameTextBox.Text = "Exception - " + $locData.DisplayName
-        }
+# Helper to seed UI from selected location
+function Invoke-GeoIpLocationUiUpdate {
+    if ($locationListBox.SelectedItem -and $locationListBox.SelectedItem.Data) {
+        $locData = $locationListBox.SelectedItem.Data
+        $countriesTextBox.Text = ($locData.Countries -join ', ')
+        $includeUnknownCheckbox.Checked = $locData.IncludeUnknown
+        $locNameTextBox.Text = "Exception - " + $locData.DisplayName
     }
+}
 
-    $locationListBox.Add_SelectedIndexChanged($updateLocationUi)
-    &$updateLocationUi.Invoke()
+$locationListBox.Add_SelectedIndexChanged([System.EventHandler]{ param($sender, $eventArgs) Invoke-GeoIpLocationUiUpdate })
+Invoke-GeoIpLocationUiUpdate
+
 
     # Country picker handler
     $countriesButton.Add_Click({
