@@ -2480,7 +2480,7 @@ Invoke-GeoIpLocationUiUpdate
                         $val = Remove-NullGraphValues $obj[$k]
                         if ($val -ne $null) { $clean[$k] = $val }
                     }
-                    return ($clean.Count -gt 0) ? $clean : $null
+                    if ($clean.Count -gt 0) { return $clean } else { return $null }
                 }
                 if ($obj -is [array] -or $obj -is [System.Collections.ArrayList]) {
                     $arr = @()
@@ -2488,7 +2488,7 @@ Invoke-GeoIpLocationUiUpdate
                         $val = Remove-NullGraphValues $item
                         if ($val -ne $null) { $arr += $val }
                     }
-                    return ($arr.Count -gt 0) ? ,$arr : $null
+                    if ($arr.Count -gt 0) { return ,$arr } else { return $null }
                 }
                 return $obj
             }
