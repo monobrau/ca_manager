@@ -107,7 +107,36 @@ $requiredModules = @(
 )
 $loadedCount = 0
 $failedModules = @()
+$moduleErrors = @()
 
+# First, check if modules are available
+$availableModules = @()
+foreach ($moduleName in $requiredModules) {
+    $moduleAvailable = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue
+    if ($moduleAvailable) {
+        $availableModules += $moduleName
+    } else {
+        $moduleErrors += "$moduleName (not found in module paths)"
+    }
+}
+
+# If no modules are available, show error immediately
+if ($availableModules.Count -eq 0) {
+    $errorMsg = "Microsoft.Graph modules could not be found.`n`n"
+    $errorMsg += "Checked module paths:`n"
+    $errorMsg += ($env:PSModulePath -split ';' | Where-Object { $_ -and $_ -notlike "*OneDrive*" } | ForEach-Object { "  - $_" }) -join "`n"
+    $errorMsg += "`n`nPlease install Microsoft.Graph module:`n`n"
+    $errorMsg += "  Install-Module Microsoft.Graph -Scope CurrentUser`n`n"
+    $errorMsg += "Or for all users (requires admin):`n`n"
+    $errorMsg += "  Install-Module Microsoft.Graph -Scope AllUsers`n`n"
+    $errorMsg += "Note: This may take several minutes as it installs multiple sub-modules.`n`n"
+    $errorMsg += "After installation, restart this application."
+    
+    [System.Windows.Forms.MessageBox]::Show($errorMsg, "Module Not Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    exit
+}
+
+# Try to import available modules
 foreach ($moduleName in $requiredModules) {
     try {
         # Check if module is already loaded
@@ -116,12 +145,20 @@ foreach ($moduleName in $requiredModules) {
             # Module already loaded, just verify cmdlets are available
             $loadedCount++
         } else {
-            # Import module with -SkipEditionCheck to bypass PackageManagement format file issues
-            Import-Module $moduleName -SkipEditionCheck -ErrorAction Stop
-            $loadedCount++
+            # Check if module is available before trying to import
+            $moduleAvailable = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue
+            if ($moduleAvailable) {
+                # Import module with -SkipEditionCheck to bypass PackageManagement format file issues
+                Import-Module $moduleName -SkipEditionCheck -ErrorAction Stop
+                $loadedCount++
+            } else {
+                $failedModules += $moduleName
+                $moduleErrors += "$moduleName (not found)"
+            }
         }
     } catch {
         $failedModules += $moduleName
+        $moduleErrors += "$moduleName ($($_.Exception.Message))"
     }
 }
 
@@ -148,13 +185,23 @@ if ($modulesLoaded) {
     if ($missingCmdlets.Count -gt 0) {
         # Required cmdlets are missing - modules not properly loaded
         $modulesLoaded = $false
+        $moduleErrors += "Required cmdlets missing: $($missingCmdlets -join ', ')"
     }
 }
 
 # Show error dialog and exit if modules couldn't be loaded
 if (-not $modulesLoaded) {
     $errorMsg = "Microsoft.Graph module could not be loaded.`n`n"
-    $errorMsg += "Please install it by running the following command in PowerShell:`n`n"
+    
+    if ($moduleErrors.Count -gt 0) {
+        $errorMsg += "Failed modules:`n"
+        $errorMsg += ($moduleErrors | ForEach-Object { "  - $_" }) -join "`n"
+        $errorMsg += "`n`n"
+    }
+    
+    $errorMsg += "Module search paths:`n"
+    $errorMsg += ($env:PSModulePath -split ';' | Where-Object { $_ -and $_ -notlike "*OneDrive*" } | ForEach-Object { "  - $_" }) -join "`n"
+    $errorMsg += "`n`nPlease install Microsoft.Graph module:`n`n"
     $errorMsg += "  Install-Module Microsoft.Graph -Scope CurrentUser`n`n"
     $errorMsg += "Or for all users (requires admin):`n`n"
     $errorMsg += "  Install-Module Microsoft.Graph -Scope AllUsers`n`n"
