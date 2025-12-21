@@ -1889,18 +1889,19 @@ function Create-GeoIpExceptionForPolicy {
     $usersTextBox.Size = New-Object System.Drawing.Size(680, 120)
     $form.Controls.Add($usersTextBox)
 
-    # Helper to seed UI from selected location
-    function Invoke-GeoIpLocationUiUpdate {
-        if ($locationListBox.SelectedItem -and $locationListBox.SelectedItem.Data) {
-            $locData = $locationListBox.SelectedItem.Data
-            $countriesTextBox.Text = ($locData.Countries -join ', ')
-            $includeUnknownCheckbox.Checked = $locData.IncludeUnknown
-            $locNameTextBox.Text = "Exception - " + $locData.DisplayName
-        }
+# Helper to seed UI from selected location
+function Invoke-GeoIpLocationUiUpdate {
+    if ($locationListBox.SelectedItem -and $locationListBox.SelectedItem.Data) {
+        $locData = $locationListBox.SelectedItem.Data
+        $countriesTextBox.Text = ($locData.Countries -join ', ')
+        $includeUnknownCheckbox.Checked = $locData.IncludeUnknown
+        $locNameTextBox.Text = "Exception - " + $locData.DisplayName
     }
+}
 
-    $locationListBox.Add_SelectedIndexChanged([System.EventHandler]{ param($sender, $eventArgs) Invoke-GeoIpLocationUiUpdate })
-    Invoke-GeoIpLocationUiUpdate
+$locationListBox.Add_SelectedIndexChanged([System.EventHandler]{ param($sender, $eventArgs) Invoke-GeoIpLocationUiUpdate })
+Invoke-GeoIpLocationUiUpdate
+
 
     # Country picker handler
     $countriesButton.Add_Click({
@@ -2020,46 +2021,30 @@ function Create-GeoIpExceptionForPolicy {
             $conditions = @{}
             $conditions.users = $userConditions
 
-            # Applications (must have includeApplications)
-            $appConditions = @{}
+            # Applications
             if ($fullPolicy.Conditions.Applications) {
+                $appConditions = @{}
                 if ($fullPolicy.Conditions.Applications.IncludeApplications -and $fullPolicy.Conditions.Applications.IncludeApplications.Count -gt 0) {
                     $appConditions.includeApplications = @($fullPolicy.Conditions.Applications.IncludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
                 }
                 if ($fullPolicy.Conditions.Applications.ExcludeApplications -and $fullPolicy.Conditions.Applications.ExcludeApplications.Count -gt 0) {
                     $appConditions.excludeApplications = @($fullPolicy.Conditions.Applications.ExcludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
                 }
+                if ($appConditions.Count -gt 0) { $conditions.applications = $appConditions }
             }
-            if (-not $appConditions.includeApplications -or $appConditions.includeApplications.Count -eq 0) {
-                # Minimal valid CA policy requires includeApplications; default to All if source was empty
-                $appConditions.includeApplications = @("All")
-            }
-            $conditions.applications = $appConditions
 
             # Locations
-            $validLocationIds = @($resolvedLocations | ForEach-Object { $_.Id })
-
             if ($fullPolicy.Conditions.Locations) {
                 $locationConditions = @{}
                 if ($fullPolicy.Conditions.Locations.IncludeLocations -and $fullPolicy.Conditions.Locations.IncludeLocations.Count -gt 0) {
                     $includeLocations = @($fullPolicy.Conditions.Locations.IncludeLocations | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    $includeLocations = $includeLocations | ForEach-Object {
-                        if ($_ -eq $locData.Id) { $newLocationId }
-                        elseif ($_ -in $validLocationIds) { $_ }
-                    }
-                    if ($includeLocations.Count -gt 0) {
-                        $locationConditions.includeLocations = $includeLocations
-                    }
+                    $includeLocations = $includeLocations | ForEach-Object { if ($_ -eq $locData.Id) { $newLocationId } else { $_ } }
+                    $locationConditions.includeLocations = $includeLocations
                 }
                 if ($fullPolicy.Conditions.Locations.ExcludeLocations -and $fullPolicy.Conditions.Locations.ExcludeLocations.Count -gt 0) {
                     $excludeLocations = @($fullPolicy.Conditions.Locations.ExcludeLocations | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    $excludeLocations = $excludeLocations | ForEach-Object {
-                        if ($_ -eq $locData.Id) { $newLocationId }
-                        elseif ($_ -in $validLocationIds) { $_ }
-                    }
-                    if ($excludeLocations.Count -gt 0) {
-                        $locationConditions.excludeLocations = $excludeLocations
-                    }
+                    $excludeLocations = $excludeLocations | ForEach-Object { if ($_ -eq $locData.Id) { $newLocationId } else { $_ } }
+                    $locationConditions.excludeLocations = $excludeLocations
                 }
                 if ($locationConditions.Count -gt 0) { $conditions.locations = $locationConditions }
             }
@@ -2078,20 +2063,15 @@ function Create-GeoIpExceptionForPolicy {
 
             if ($conditions.Count -gt 0) { $newPolicyBody.conditions = $conditions }
 
-            # Grant controls (must exist; default to block if missing)
-            $grantControls = @{}
+            # Grant controls
             if ($fullPolicy.GrantControls) {
+                $grantControls = @{}
                 $grantControls.operator = ($fullPolicy.GrantControls.Operator) ? $fullPolicy.GrantControls.Operator : "OR"
                 if ($fullPolicy.GrantControls.BuiltInControls) { $grantControls.builtInControls = @($fullPolicy.GrantControls.BuiltInControls | Where-Object { $_ -ne $null -and $_ -ne "" }) }
                 if ($fullPolicy.GrantControls.CustomAuthenticationFactors) { $grantControls.customAuthenticationFactors = @($fullPolicy.GrantControls.CustomAuthenticationFactors | Where-Object { $_ -ne $null -and $_ -ne "" }) }
                 if ($fullPolicy.GrantControls.TermsOfUse) { $grantControls.termsOfUse = @($fullPolicy.GrantControls.TermsOfUse | Where-Object { $_ -ne $null -and $_ -ne "" }) }
+                $newPolicyBody.grantControls = $grantControls
             }
-            if (-not $grantControls.operator) { $grantControls.operator = "OR" }
-            if (-not $grantControls.builtInControls -and -not $grantControls.customAuthenticationFactors -and -not $grantControls.termsOfUse) {
-                # If source grant controls were empty, require MFA/Block is typical; use block to stay safe
-                $grantControls.builtInControls = @("block")
-            }
-            $newPolicyBody.grantControls = $grantControls
 
             # Session controls (simple copy)
             if ($fullPolicy.SessionControls) {
