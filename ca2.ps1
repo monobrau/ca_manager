@@ -1890,7 +1890,7 @@ function Create-GeoIpExceptionForPolicy {
     $form.Controls.Add($usersTextBox)
 
     # Helper to seed UI from selected location
-    function Invoke-GeoIpLocationUiUpdate {
+    $updateLocationUi = {
         if ($locationListBox.SelectedItem -and $locationListBox.SelectedItem.Data) {
             $locData = $locationListBox.SelectedItem.Data
             $countriesTextBox.Text = ($locData.Countries -join ', ')
@@ -1899,8 +1899,8 @@ function Create-GeoIpExceptionForPolicy {
         }
     }
 
-    $locationListBox.Add_SelectedIndexChanged({ Invoke-GeoIpLocationUiUpdate })
-    Invoke-GeoIpLocationUiUpdate
+    $locationListBox.Add_SelectedIndexChanged($updateLocationUi)
+    &$updateLocationUi.Invoke()
 
     # Country picker handler
     $countriesButton.Add_Click({
