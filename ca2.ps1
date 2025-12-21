@@ -63,7 +63,48 @@ try {
 
 # Check for Microsoft Graph module
 Write-Host "Checking for Microsoft.Graph module..." -ForegroundColor Cyan
-$graphModule = Get-Module -ListAvailable -Name Microsoft.Graph
+
+# Refresh module cache - sometimes needed when running as EXE
+$null = Get-Module -ListAvailable -Force | Out-Null
+
+# Check all module paths explicitly (EXE might have different PSModulePath)
+$modulePaths = $env:PSModulePath -split ';'
+Write-Host "Checking module paths:" -ForegroundColor Gray
+foreach ($path in $modulePaths) {
+    if (Test-Path $path) {
+        Write-Host "  - $path" -ForegroundColor Gray
+    }
+}
+
+# Try to find Microsoft.Graph module
+$graphModule = Get-Module -ListAvailable -Name Microsoft.Graph -ErrorAction SilentlyContinue
+
+# If not found, try searching all module paths manually
+if (-not $graphModule) {
+    Write-Host "Module not found via Get-Module, checking paths manually..." -ForegroundColor Yellow
+    foreach ($modulePath in $modulePaths) {
+        if (Test-Path $modulePath) {
+            $graphPath = Join-Path $modulePath "Microsoft.Graph"
+            if (Test-Path $graphPath) {
+                Write-Host "Found Microsoft.Graph at: $graphPath" -ForegroundColor Green
+                $graphModule = Get-Item $graphPath
+                break
+            }
+        }
+    }
+}
+
+# Try to import the module to verify it's actually usable
+if ($graphModule) {
+    try {
+        Import-Module Microsoft.Graph -ErrorAction Stop -Force
+        Write-Host "Microsoft.Graph module loaded successfully." -ForegroundColor Green
+    } catch {
+        Write-Host "Warning: Module found but could not be imported: $_" -ForegroundColor Yellow
+        $graphModule = $null
+    }
+}
+
 if (-not $graphModule) {
     # Try alternative check - sometimes modules are installed but not in the expected location
     $allModules = Get-Module -ListAvailable | Where-Object { $_.Name -like "Microsoft.Graph*" }
@@ -78,6 +119,8 @@ if (-not $graphModule) {
         Write-Host "  Install-Module Microsoft.Graph -Scope AllUsers" -ForegroundColor Cyan
         Write-Host ""
         Write-Host "Note: This may take several minutes as it installs multiple sub-modules." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "After installation, you may need to restart this application." -ForegroundColor Yellow
         Write-Host ""
         Read-Host "Press Enter to exit"
         exit
@@ -94,11 +137,24 @@ $requiredModules = @(
 )
 $missingModules = @()
 foreach ($moduleName in $requiredModules) {
-    $module = Get-Module -ListAvailable -Name $moduleName
+    $module = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue
     if (-not $module) {
-        $missingModules += $moduleName
+        # Try to import it - sometimes it's available but not listed
+        try {
+            Import-Module $moduleName -ErrorAction Stop -Force
+            Write-Host "  Found and loaded: $moduleName" -ForegroundColor Green
+        } catch {
+            $missingModules += $moduleName
+            Write-Host "  Missing: $moduleName" -ForegroundColor Yellow
+        }
     } else {
         Write-Host "  Found: $moduleName" -ForegroundColor Green
+        # Try to import it to verify it works
+        try {
+            Import-Module $moduleName -ErrorAction Stop -Force
+        } catch {
+            Write-Host "    Warning: Could not import $moduleName" -ForegroundColor Yellow
+        }
     }
 }
 
@@ -120,6 +176,33 @@ if ($missingModules.Count -gt 0) {
     }
 } else {
     Write-Host "All required modules found." -ForegroundColor Green
+    
+    # Verify cmdlets are actually available (sometimes modules are detected but cmdlets aren't)
+    Write-Host "Verifying cmdlets are available..." -ForegroundColor Cyan
+    $testCmdlets = @("Get-MgContext", "Connect-MgGraph")
+    $missingCmdlets = @()
+    foreach ($cmdlet in $testCmdlets) {
+        if (-not (Get-Command $cmdlet -ErrorAction SilentlyContinue)) {
+            $missingCmdlets += $cmdlet
+        }
+    }
+    
+    if ($missingCmdlets.Count -gt 0) {
+        Write-Host ""
+        Write-Host "WARNING: Modules found but cmdlets not available:" -ForegroundColor Yellow
+        foreach ($cmdlet in $missingCmdlets) {
+            Write-Host "  - $cmdlet" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        Write-Host "Try importing the modules manually:" -ForegroundColor Yellow
+        Write-Host "  Import-Module Microsoft.Graph" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Or reinstall the modules:" -ForegroundColor Yellow
+        Write-Host "  Install-Module Microsoft.Graph -Scope CurrentUser -Force" -ForegroundColor Cyan
+        Write-Host ""
+    } else {
+        Write-Host "Cmdlets verified and ready to use." -ForegroundColor Green
+    }
 }
 Write-Host ""
 
