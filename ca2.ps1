@@ -61,126 +61,52 @@ try {
     exit
 }
 
-# Check for Microsoft Graph module
+# Check for Microsoft Graph module - simplified approach
 Write-Host "Checking for Microsoft.Graph module..." -ForegroundColor Cyan
 
-# Refresh module cache - sometimes needed when running as EXE
-$null = Get-Module -ListAvailable | Out-Null
+$modulesLoaded = $false
+$moduleError = $null
 
-# Check all module paths explicitly (EXE might have different PSModulePath)
-$modulePaths = $env:PSModulePath -split ';'
-Write-Host "Checking module paths:" -ForegroundColor Gray
-foreach ($path in $modulePaths) {
-    if (Test-Path $path) {
-        Write-Host "  - $path" -ForegroundColor Gray
-    }
-}
-
-# Try to find Microsoft.Graph module
-$graphModule = Get-Module -ListAvailable -Name Microsoft.Graph -ErrorAction SilentlyContinue
-
-# If not found, try searching all module paths manually
-if (-not $graphModule) {
-    Write-Host "Module not found via Get-Module, checking paths manually..." -ForegroundColor Yellow
-    foreach ($modulePath in $modulePaths) {
-        if (Test-Path $modulePath) {
-            $graphPath = Join-Path $modulePath "Microsoft.Graph"
-            if (Test-Path $graphPath) {
-                Write-Host "Found Microsoft.Graph at: $graphPath" -ForegroundColor Green
-                $graphModule = Get-Item $graphPath
-                break
-            }
-        }
-    }
-}
-
-# Try to import the module to verify it's actually usable
-if ($graphModule) {
-    try {
-        Import-Module Microsoft.Graph -ErrorAction Stop
-        Write-Host "Microsoft.Graph module loaded successfully." -ForegroundColor Green
-    } catch {
-        Write-Host "Warning: Module found but could not be imported: $_" -ForegroundColor Yellow
-        $graphModule = $null
-    }
-}
-
-if (-not $graphModule) {
-    # Try alternative check - sometimes modules are installed but not in the expected location
-    $allModules = Get-Module -ListAvailable | Where-Object { $_.Name -like "Microsoft.Graph*" }
-    if ($allModules.Count -eq 0) {
-        Write-Host ""
-        Write-Host "ERROR: Microsoft.Graph module not installed." -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Please install it by running the following command in PowerShell:" -ForegroundColor Yellow
-        Write-Host "  Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "Or for all users (requires admin):" -ForegroundColor Yellow
-        Write-Host "  Install-Module Microsoft.Graph -Scope AllUsers" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "Note: This may take several minutes as it installs multiple sub-modules." -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "After installation, you may need to restart this application." -ForegroundColor Yellow
-        Write-Host ""
-        Read-Host "Press Enter to exit"
-        exit
-    } else {
-        Write-Host "Found Microsoft.Graph sub-modules, but main module not detected." -ForegroundColor Yellow
-        Write-Host "Attempting to import required modules..." -ForegroundColor Cyan
-    }
-}
-
-# Check for required sub-modules
-$requiredModules = @(
-    "Microsoft.Graph.Identity.SignIns",
-    "Microsoft.Graph.Users"
-)
-$missingModules = @()
-foreach ($moduleName in $requiredModules) {
-    $module = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue
-    if (-not $module) {
-        # Try to import it - sometimes it's available but not listed
-        try {
-            Import-Module $moduleName -ErrorAction Stop
-            Write-Host "  Found and loaded: $moduleName" -ForegroundColor Green
-        } catch {
-            $missingModules += $moduleName
-            Write-Host "  Missing: $moduleName" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "  Found: $moduleName" -ForegroundColor Green
-        # Try to import it to verify it works
-        try {
-            Import-Module $moduleName -ErrorAction Stop
-        } catch {
-            Write-Host "    Warning: Could not import $moduleName" -ForegroundColor Yellow
-        }
-    }
-}
-
-if ($missingModules.Count -gt 0) {
+# Simple approach: Just try to import the modules
+# This works better in EXE environments where Get-Module might not find them
+try {
+    # Try to import Microsoft.Graph (this will import all sub-modules)
+    Import-Module Microsoft.Graph -ErrorAction Stop
+    Write-Host "Microsoft.Graph module loaded successfully." -ForegroundColor Green
+    $modulesLoaded = $true
+} catch {
+    $moduleError = $_.Exception.Message
+    Write-Host "Could not import Microsoft.Graph module." -ForegroundColor Yellow
+    Write-Host "Error: $moduleError" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "WARNING: Some required Microsoft.Graph sub-modules are missing:" -ForegroundColor Yellow
-    foreach ($module in $missingModules) {
-        Write-Host "  - $module" -ForegroundColor Yellow
-    }
-    Write-Host ""
-    Write-Host "Please install them by running:" -ForegroundColor Yellow
-    Write-Host "  Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "This will install all required sub-modules." -ForegroundColor Yellow
-    Write-Host ""
-    $continue = Read-Host "Continue anyway? (y/n)"
-    if ($continue -ne "y" -and $continue -ne "Y") {
-        exit
-    }
-} else {
-    Write-Host "All required modules found." -ForegroundColor Green
     
-    # Verify cmdlets are actually available (sometimes modules are detected but cmdlets aren't)
+    # Try importing sub-modules individually
+    Write-Host "Attempting to import sub-modules individually..." -ForegroundColor Cyan
+    $subModules = @("Microsoft.Graph.Identity.SignIns", "Microsoft.Graph.Users")
+    $loadedCount = 0
+    
+    foreach ($moduleName in $subModules) {
+        try {
+            Import-Module $moduleName -ErrorAction Stop
+            Write-Host "  Loaded: $moduleName" -ForegroundColor Green
+            $loadedCount++
+        } catch {
+            Write-Host "  Failed: $moduleName" -ForegroundColor Yellow
+        }
+    }
+    
+    if ($loadedCount -gt 0) {
+        Write-Host "Some modules loaded. Continuing..." -ForegroundColor Green
+        $modulesLoaded = $true
+    }
+}
+
+# Verify cmdlets are available
+if ($modulesLoaded) {
     Write-Host "Verifying cmdlets are available..." -ForegroundColor Cyan
     $testCmdlets = @("Get-MgContext", "Connect-MgGraph")
     $missingCmdlets = @()
+    
     foreach ($cmdlet in $testCmdlets) {
         if (-not (Get-Command $cmdlet -ErrorAction SilentlyContinue)) {
             $missingCmdlets += $cmdlet
@@ -189,21 +115,39 @@ if ($missingModules.Count -gt 0) {
     
     if ($missingCmdlets.Count -gt 0) {
         Write-Host ""
-        Write-Host "WARNING: Modules found but cmdlets not available:" -ForegroundColor Yellow
+        Write-Host "WARNING: Modules loaded but some cmdlets are not available:" -ForegroundColor Yellow
         foreach ($cmdlet in $missingCmdlets) {
             Write-Host "  - $cmdlet" -ForegroundColor Yellow
         }
         Write-Host ""
-        Write-Host "Try importing the modules manually:" -ForegroundColor Yellow
-        Write-Host "  Import-Module Microsoft.Graph" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "Or reinstall the modules:" -ForegroundColor Yellow
-        Write-Host "  Install-Module Microsoft.Graph -Scope CurrentUser -Force" -ForegroundColor Cyan
+        Write-Host "The application may not work correctly." -ForegroundColor Yellow
         Write-Host ""
     } else {
-        Write-Host "Cmdlets verified and ready to use." -ForegroundColor Green
+        Write-Host "All required cmdlets are available." -ForegroundColor Green
     }
+} else {
+    # Modules couldn't be loaded - show installation instructions
+    Write-Host ""
+    Write-Host "ERROR: Microsoft.Graph module could not be loaded." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Please install it by running the following command in PowerShell:" -ForegroundColor Yellow
+    Write-Host "  Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Or for all users (requires admin):" -ForegroundColor Yellow
+    Write-Host "  Install-Module Microsoft.Graph -Scope AllUsers" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Note: This may take several minutes as it installs multiple sub-modules." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "After installation, restart this application." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "If modules are already installed, try running:" -ForegroundColor Yellow
+    Write-Host "  Import-Module Microsoft.Graph" -ForegroundColor Cyan
+    Write-Host "in PowerShell to verify they work." -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "Press Enter to exit"
+    exit
 }
+
 Write-Host ""
 
 # PowerShell Core compatible InputBox function
