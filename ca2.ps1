@@ -7,63 +7,56 @@
     Requirements: Windows PowerShell 5.1 with Microsoft.Graph module
 #>
 
+# Suppress Write-Host output when running as EXE (no console window)
+# Redirect all Write-Host to null to prevent popups
+function Write-Host {
+    param(
+        [Parameter(ValueFromPipeline=$true)]
+        [object]$Object,
+        [switch]$NoNewline,
+        [System.ConsoleColor]$ForegroundColor,
+        [System.ConsoleColor]$BackgroundColor
+    )
+    # Do nothing - suppress all Write-Host output
+}
+
 # Check PowerShell version first (before loading anything)
 # PowerShell Core is now supported
 if ($PSVersionTable.PSEdition -eq "Core") {
-    Write-Host "Running in PowerShell Core (pwsh) - Windows Forms support enabled" -ForegroundColor Green
-    
     # Check if we're on Windows (required for Windows Forms)
     if ($IsWindows -eq $false) {
-        Write-Error "This script requires Windows to run. Windows Forms is not available on non-Windows platforms."
-        Write-Host "Please run this script on a Windows machine or in Windows Subsystem for Linux (WSL)." -ForegroundColor Yellow
-        Read-Host "Press Enter to exit"
+        [System.Windows.Forms.MessageBox]::Show("This script requires Windows to run. Windows Forms is not available on non-Windows platforms.`n`nPlease run this script on a Windows machine or in Windows Subsystem for Linux (WSL).", "Platform Not Supported", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
         exit
     }
-} else {
-    Write-Host "Running in Windows PowerShell" -ForegroundColor Green
 }
 
 # Load assemblies and configure immediately (must be done before ANY Windows Forms objects are created)
 try {
-    Write-Host "Loading Windows Forms assemblies..." -ForegroundColor Green
-    
     # Load assemblies first - works in both PowerShell Core and Windows PowerShell
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing  
     
     # Only load Microsoft.VisualBasic if available (may not be in PowerShell Core)
     try {
-        Add-Type -AssemblyName Microsoft.VisualBasic
-        Write-Host "Microsoft.VisualBasic loaded successfully." -ForegroundColor Green
+        Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction SilentlyContinue
     } catch {
-        Write-Host "Microsoft.VisualBasic not available, using custom InputBox implementation." -ForegroundColor Yellow
+        # Will use custom InputBox implementation
     }
-    
-    Write-Host "Configuring Windows Forms rendering..." -ForegroundColor Green
     
     # Try to configure rendering - if it fails, continue anyway
     try {
         [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
         [System.Windows.Forms.Application]::EnableVisualStyles()
-        Write-Host "Windows Forms configured with visual styles." -ForegroundColor Green
     } catch {
-        Write-Warning "Could not set text rendering default (forms may already exist). Continuing..."
+        # Forms may already exist, continue anyway
         [System.Windows.Forms.Application]::EnableVisualStyles()
-        Write-Host "Windows Forms configured (basic mode)." -ForegroundColor Green
     }
-    
-    Write-Host "Windows Forms initialized successfully." -ForegroundColor Green
 } catch {
-    Write-Error "Failed to initialize Windows Forms: $_"
-    Write-Host "This error can occur if Windows Forms objects were already created." -ForegroundColor Yellow
-    Write-Host "Try restarting PowerShell and running the script again." -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
+    [System.Windows.Forms.MessageBox]::Show("Failed to initialize Windows Forms: $_`n`nThis error can occur if Windows Forms objects were already created. Try restarting the application.", "Initialization Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
     exit
 }
 
-# Check for Microsoft Graph module - EXE-compatible approach
-Write-Host "Checking for Microsoft.Graph module..." -ForegroundColor Cyan
-
+# Check for Microsoft Graph module - EXE-compatible approach (silent)
 # EXE environments often don't have the user's module path
 # Add common module paths explicitly
 $userModulePath = Join-Path $env:USERPROFILE "Documents\PowerShell\Modules"
@@ -95,11 +88,7 @@ if (Test-Path $programModulePath2) {
 }
 
 if ($pathsToAdd.Count -gt 0) {
-    Write-Host "Adding module paths for EXE compatibility..." -ForegroundColor Cyan
     $env:PSModulePath = ($pathsToAdd + ($env:PSModulePath -split ';')) -join ';'
-    foreach ($path in $pathsToAdd) {
-        Write-Host "  Added: $path" -ForegroundColor Gray
-    }
 }
 
 $modulesLoaded = $false
@@ -107,7 +96,6 @@ $moduleError = $null
 
 # Import only the specific sub-modules we need (not the full Microsoft.Graph)
 # This avoids hitting PowerShell's function limit (~4096 functions)
-Write-Host "Importing required Microsoft.Graph sub-modules..." -ForegroundColor Cyan
 $requiredModules = @(
     "Microsoft.Graph.Identity.SignIns",
     "Microsoft.Graph.Users"
@@ -118,31 +106,23 @@ $failedModules = @()
 foreach ($moduleName in $requiredModules) {
     try {
         Import-Module $moduleName -ErrorAction Stop
-        Write-Host "  Loaded: $moduleName" -ForegroundColor Green
         $loadedCount++
     } catch {
-        $errorMsg = $_.Exception.Message
-        Write-Host "  Failed: $moduleName" -ForegroundColor Yellow
-        Write-Host "    Error: $errorMsg" -ForegroundColor Yellow
         $failedModules += $moduleName
     }
 }
 
 if ($loadedCount -eq $requiredModules.Count) {
-    Write-Host "All required modules loaded successfully." -ForegroundColor Green
     $modulesLoaded = $true
 } elseif ($loadedCount -gt 0) {
-    Write-Host "Some modules loaded ($loadedCount of $($requiredModules.Count))." -ForegroundColor Yellow
-    Write-Host "The application may have limited functionality." -ForegroundColor Yellow
+    # Some modules loaded - warn user but continue
     $modulesLoaded = $true
 } else {
     $moduleError = "Could not load any required modules"
-    Write-Host "Failed to load required modules." -ForegroundColor Red
 }
 
 # Verify cmdlets are available
 if ($modulesLoaded) {
-    Write-Host "Verifying cmdlets are available..." -ForegroundColor Cyan
     $testCmdlets = @("Get-MgContext", "Connect-MgGraph")
     $missingCmdlets = @()
     
@@ -153,41 +133,22 @@ if ($modulesLoaded) {
     }
     
     if ($missingCmdlets.Count -gt 0) {
-        Write-Host ""
-        Write-Host "WARNING: Modules loaded but some cmdlets are not available:" -ForegroundColor Yellow
-        foreach ($cmdlet in $missingCmdlets) {
-            Write-Host "  - $cmdlet" -ForegroundColor Yellow
-        }
-        Write-Host ""
-        Write-Host "The application may not work correctly." -ForegroundColor Yellow
-        Write-Host ""
-    } else {
-        Write-Host "All required cmdlets are available." -ForegroundColor Green
+        # Show warning but continue
+        $modulesLoaded = $false
     }
 } else {
-    # Modules couldn't be loaded - show installation instructions
-    Write-Host ""
-    Write-Host "ERROR: Microsoft.Graph module could not be loaded." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Please install it by running the following command in PowerShell:" -ForegroundColor Yellow
-    Write-Host "  Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Or for all users (requires admin):" -ForegroundColor Yellow
-    Write-Host "  Install-Module Microsoft.Graph -Scope AllUsers" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Note: This may take several minutes as it installs multiple sub-modules." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "After installation, restart this application." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "If modules are already installed, try running:" -ForegroundColor Yellow
-    Write-Host "  Import-Module Microsoft.Graph" -ForegroundColor Cyan
-    Write-Host "in PowerShell to verify they work." -ForegroundColor Yellow
-    Write-Host ""
-    Read-Host "Press Enter to exit"
+    # Modules couldn't be loaded - show installation instructions in MessageBox
+    $errorMsg = "Microsoft.Graph module could not be loaded.`n`n"
+    $errorMsg += "Please install it by running the following command in PowerShell:`n`n"
+    $errorMsg += "  Install-Module Microsoft.Graph -Scope CurrentUser`n`n"
+    $errorMsg += "Or for all users (requires admin):`n`n"
+    $errorMsg += "  Install-Module Microsoft.Graph -Scope AllUsers`n`n"
+    $errorMsg += "Note: This may take several minutes as it installs multiple sub-modules.`n`n"
+    $errorMsg += "After installation, restart this application."
+    
+    [System.Windows.Forms.MessageBox]::Show($errorMsg, "Module Not Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
     exit
 }
-
-Write-Host ""
 
 # PowerShell Core compatible InputBox function
 function Show-InputBox {
@@ -515,11 +476,9 @@ function Refresh-NamedLocationsList {
     $listView.Items.Clear()
     
     try {
-        Write-Host "Refreshing Named Locations list..." -ForegroundColor Yellow
         $locations = Get-MgIdentityConditionalAccessNamedLocation -All -ErrorAction Stop
         
         # Get all policies to check references (cache for performance)
-        Write-Host "Loading policies to check references..." -ForegroundColor Yellow
         $allPolicies = @()
         try {
             $allPolicies = Get-MgIdentityConditionalAccessPolicy -All -ErrorAction SilentlyContinue
@@ -578,13 +537,13 @@ function Refresh-NamedLocationsList {
                 $item.Tag = $location
                 $listView.Items.Add($item) | Out-Null
             } catch {
-                Write-Host ("Error processing location " + $location.DisplayName + ": " + $_.Exception.Message) -ForegroundColor Red
+                # Error processing location - continue with others
                 # Continue with other locations
             }
         }
-        Write-Host ("Loaded " + $locations.Count + " Named Locations") -ForegroundColor Green
+        # Loaded locations successfully
     } catch {
-        Write-Host ("Error loading Named Locations: " + $_.Exception.Message) -ForegroundColor Red
+        # Error loading Named Locations
         [System.Windows.Forms.MessageBox]::Show("Error loading Named Locations: $_", "Error")
     }
 }
@@ -1449,14 +1408,14 @@ function Remove-SelectedNamedLocation {
                         LocationName = $locationName
                         PolicyNames = $policyNames
                     }
-                    Write-Host "Skipping '$locationName' - referenced by policies: $($policyNames -join ', ')" -ForegroundColor Yellow
+                    # Skipping - referenced by policies
                     $skippedCount++
                     continue
                 }
                 
                 # Delete the location
                 Remove-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locationId -ErrorAction Stop
-                Write-Host "Deleted '$locationName' successfully." -ForegroundColor Green
+                # Deleted successfully
                 $deletedCount++
                 
                 # Small delay between deletions to avoid rate limiting
@@ -1469,10 +1428,10 @@ function Remove-SelectedNamedLocation {
                     Write-Host "Skipping '$locationName' - already deleted." -ForegroundColor Yellow
                     $skippedCount++
                 } elseif ($_.Exception.Message -like "*referenced*" -or $_.Exception.Message -like "*1178*") {
-                    Write-Host "Skipping '$locationName' - referenced by policies." -ForegroundColor Yellow
+                    # Skipping - referenced by policies
                     $skippedCount++
                 } else {
-                    Write-Host "Error deleting '$locationName': $_" -ForegroundColor Red
+                    # Error deleting location
                     $errors += "$locationName : $($_.Exception.Message)"
                     $errorCount++
                 }
