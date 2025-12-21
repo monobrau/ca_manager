@@ -79,7 +79,7 @@ function Show-InputBox {
     
     # Try to use native InputBox if Microsoft.VisualBasic is available
     try {
-        if ([System.Management.Automation.PSTypeName]'Microsoft.VisualBasic.Interaction').Type) {
+        if (([System.Management.Automation.PSTypeName]'Microsoft.VisualBasic.Interaction').Type) {
             return [Microsoft.VisualBasic.Interaction]::InputBox($Prompt, $Title, $DefaultValue)
         }
     } catch {
@@ -1727,6 +1727,452 @@ function Copy-SelectedPolicy {
     }
 }
 
+# New workflow: create a geo-IP exception by duplicating a policy, cloning a country named location with new countries,
+# adding specific users to the new policy, and excluding those users from the original policy.
+function Create-GeoIpExceptionForPolicy {
+    param($listView)
+    
+    if (-not $global:isConnected) {
+        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
+        return
+    }
+
+    if ($listView.SelectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Please select a Conditional Access Policy.", "No Selection")
+        return
+    }
+
+    $selectedItem = $listView.SelectedItems[0]
+    $policy = $selectedItem.Tag
+    $policyId = $policy.Id
+
+    try {
+        $fullPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Unable to load the selected policy: $_", "Error")
+        return
+    }
+
+    if (-not $fullPolicy.Conditions -or -not $fullPolicy.Conditions.Locations) {
+        [System.Windows.Forms.MessageBox]::Show("The selected policy has no location conditions to clone.", "Not Supported")
+        return
+    }
+
+    # Collect all referenced location IDs (include + exclude) and resolve them
+    $referencedLocationIds = @()
+    if ($fullPolicy.Conditions.Locations.IncludeLocations) { $referencedLocationIds += $fullPolicy.Conditions.Locations.IncludeLocations }
+    if ($fullPolicy.Conditions.Locations.ExcludeLocations) { $referencedLocationIds += $fullPolicy.Conditions.Locations.ExcludeLocations }
+    $referencedLocationIds = $referencedLocationIds | Where-Object { $_ -ne $null -and $_ -ne "" } | Select-Object -Unique
+
+    $resolvedLocations = @()
+    foreach ($locId in $referencedLocationIds) {
+        try {
+            $loc = Get-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locId -ErrorAction Stop
+            $odataType = $loc.AdditionalProperties.'@odata.type'
+            if ($odataType -eq '#microsoft.graph.countryNamedLocation') {
+                # Track whether the location is used in include/exclude
+                $usage = @()
+                if ($fullPolicy.Conditions.Locations.IncludeLocations -contains $locId) { $usage += "Included" }
+                if ($fullPolicy.Conditions.Locations.ExcludeLocations -contains $locId) { $usage += "Excluded" }
+
+                $resolvedLocations += [PSCustomObject]@{
+                    Id = $loc.Id
+                    DisplayName = $loc.DisplayName
+                    Countries = $loc.AdditionalProperties['countriesAndRegions']
+                    IncludeUnknown = [bool]$loc.AdditionalProperties['includeUnknownCountriesAndRegions']
+                    Usage = ($usage -join ', ')
+                }
+            }
+        } catch {
+            Write-Host ("Skipping location $locId due to error: " + $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+
+    if ($resolvedLocations.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No country-based named locations were found in this policy.", "Not Supported")
+        return
+    }
+
+    # Build a wizard-style form
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Create Geo-IP Exception"
+    $form.Size = New-Object System.Drawing.Size(720, 650)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+
+    $infoLabel = New-Object System.Windows.Forms.Label
+    $infoLabel.Text = "This will copy the selected policy, clone a named location with new countries, add users to the new policy, and exclude them from the original."
+    $infoLabel.Location = New-Object System.Drawing.Point(10, 10)
+    $infoLabel.Size = New-Object System.Drawing.Size(690, 30)
+    $form.Controls.Add($infoLabel)
+
+    # Policy name input
+    $policyNameLabel = New-Object System.Windows.Forms.Label
+    $policyNameLabel.Text = "New policy name:"
+    $policyNameLabel.Location = New-Object System.Drawing.Point(10, 50)
+    $policyNameLabel.Size = New-Object System.Drawing.Size(200, 20)
+    $form.Controls.Add($policyNameLabel)
+
+    $policyNameTextBox = New-Object System.Windows.Forms.TextBox
+    $policyNameTextBox.Location = New-Object System.Drawing.Point(10, 70)
+    $policyNameTextBox.Size = New-Object System.Drawing.Size(680, 20)
+    $policyNameTextBox.Text = ($policy.DisplayName + " - Geo Exception")
+    $form.Controls.Add($policyNameTextBox)
+
+    # Location selector
+    $locationLabel = New-Object System.Windows.Forms.Label
+    $locationLabel.Text = "Choose the location to clone and relax:" 
+    $locationLabel.Location = New-Object System.Drawing.Point(10, 105)
+    $locationLabel.Size = New-Object System.Drawing.Size(300, 20)
+    $form.Controls.Add($locationLabel)
+
+    $locationListBox = New-Object System.Windows.Forms.ListBox
+    $locationListBox.Location = New-Object System.Drawing.Point(10, 130)
+    $locationListBox.Size = New-Object System.Drawing.Size(680, 100)
+    $locationListBox.DisplayMember = "Display"
+    $locationListBox.SelectionMode = "One"
+    foreach ($loc in $resolvedLocations) {
+        $display = "$($loc.DisplayName) [$($loc.Id)] - $($loc.Usage)"
+        $item = New-Object PSObject -Property @{ Data = $loc; Display = $display }
+        $locationListBox.Items.Add($item) | Out-Null
+    }
+    if ($locationListBox.Items.Count -gt 0) { $locationListBox.SelectedIndex = 0 }
+    $form.Controls.Add($locationListBox)
+
+    # New location name
+    $locNameLabel = New-Object System.Windows.Forms.Label
+    $locNameLabel.Text = "New named location name:"
+    $locNameLabel.Location = New-Object System.Drawing.Point(10, 245)
+    $locNameLabel.Size = New-Object System.Drawing.Size(200, 20)
+    $form.Controls.Add($locNameLabel)
+
+    $locNameTextBox = New-Object System.Windows.Forms.TextBox
+    $locNameTextBox.Location = New-Object System.Drawing.Point(10, 265)
+    $locNameTextBox.Size = New-Object System.Drawing.Size(680, 20)
+    $form.Controls.Add($locNameTextBox)
+
+    # Country selection controls
+    $countriesLabel = New-Object System.Windows.Forms.Label
+    $countriesLabel.Text = "Countries for the exception (use selector):"
+    $countriesLabel.Location = New-Object System.Drawing.Point(10, 295)
+    $countriesLabel.Size = New-Object System.Drawing.Size(300, 20)
+    $form.Controls.Add($countriesLabel)
+
+    $countriesTextBox = New-Object System.Windows.Forms.TextBox
+    $countriesTextBox.Location = New-Object System.Drawing.Point(10, 315)
+    $countriesTextBox.Size = New-Object System.Drawing.Size(550, 20)
+    $countriesTextBox.ReadOnly = $true
+    $form.Controls.Add($countriesTextBox)
+
+    $countriesButton = New-Object System.Windows.Forms.Button
+    $countriesButton.Text = "Select Countries"
+    $countriesButton.Location = New-Object System.Drawing.Point(570, 313)
+    $countriesButton.Size = New-Object System.Drawing.Size(120, 24)
+    $form.Controls.Add($countriesButton)
+
+    $includeUnknownCheckbox = New-Object System.Windows.Forms.CheckBox
+    $includeUnknownCheckbox.Text = "Include unknown/future countries"
+    $includeUnknownCheckbox.Location = New-Object System.Drawing.Point(10, 345)
+    $includeUnknownCheckbox.Size = New-Object System.Drawing.Size(300, 20)
+    $form.Controls.Add($includeUnknownCheckbox)
+
+    # Users to add
+    $usersLabel = New-Object System.Windows.Forms.Label
+    $usersLabel.Text = "Users to include in new policy and exclude from original (one per line: UPN, name, or ID):"
+    $usersLabel.Location = New-Object System.Drawing.Point(10, 375)
+    $usersLabel.Size = New-Object System.Drawing.Size(690, 20)
+    $form.Controls.Add($usersLabel)
+
+    $usersTextBox = New-Object System.Windows.Forms.RichTextBox
+    $usersTextBox.Location = New-Object System.Drawing.Point(10, 400)
+    $usersTextBox.Size = New-Object System.Drawing.Size(680, 120)
+    $form.Controls.Add($usersTextBox)
+
+    # Helper to seed UI from selected location
+    function Invoke-GeoIpLocationUiUpdate {
+        if ($locationListBox.SelectedItem -and $locationListBox.SelectedItem.Data) {
+            $locData = $locationListBox.SelectedItem.Data
+            $countriesTextBox.Text = ($locData.Countries -join ', ')
+            $includeUnknownCheckbox.Checked = $locData.IncludeUnknown
+            $locNameTextBox.Text = "Exception - " + $locData.DisplayName
+        }
+    }
+
+    $locationListBox.Add_SelectedIndexChanged([System.EventHandler]{ param($sender, $eventArgs) Invoke-GeoIpLocationUiUpdate })
+    Invoke-GeoIpLocationUiUpdate
+
+    # Country picker handler
+    $countriesButton.Add_Click({
+        $current = @()
+        if (-not [string]::IsNullOrWhiteSpace($countriesTextBox.Text)) {
+            $current = $countriesTextBox.Text.Split(',') | ForEach-Object { $_.Trim().ToUpper() }
+        }
+        $selectedCountries = Show-CountrySelectionDialog -PreselectedCountries $current
+        if ($selectedCountries) {
+            $countriesTextBox.Text = ($selectedCountries -join ', ')
+        }
+    })
+
+    # Buttons
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "Create Exception"
+    $okButton.Location = New-Object System.Drawing.Point(500, 540)
+    $okButton.Size = New-Object System.Drawing.Size(90, 30)
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(600, 540)
+    $cancelButton.Size = New-Object System.Drawing.Size(90, 30)
+    $cancelButton.Add_Click({ $form.Close() })
+    $form.Controls.Add($cancelButton)
+
+    $okButton.Add_Click({
+        if (-not $locationListBox.SelectedItem) {
+            [System.Windows.Forms.MessageBox]::Show("Please select a named location to clone.", "Validation Error")
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($locNameTextBox.Text)) {
+            [System.Windows.Forms.MessageBox]::Show("Please provide a name for the new named location.", "Validation Error")
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($policyNameTextBox.Text)) {
+            [System.Windows.Forms.MessageBox]::Show("Please provide a name for the new policy.", "Validation Error")
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($countriesTextBox.Text)) {
+            [System.Windows.Forms.MessageBox]::Show("Please select at least one country.", "Validation Error")
+            return
+        }
+
+        $countryCodes = $countriesTextBox.Text.Split(',') | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ -ne "" }
+        if ($countryCodes.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Please select at least one country.", "Validation Error")
+            return
+        }
+
+        $userInputs = $usersTextBox.Text.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        if ($userInputs.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Please enter at least one user to add.", "Validation Error")
+            return
+        }
+
+        $locData = $locationListBox.SelectedItem.Data
+        $newLocationName = $locNameTextBox.Text
+        $newPolicyName = $policyNameTextBox.Text
+        $includeUnknown = $includeUnknownCheckbox.Checked
+
+        try {
+            $resolved = Resolve-UserInput -UserInputs $userInputs
+            if ($resolved.NotFoundUsers.Count -gt 0) {
+                $msg = "The following users could not be resolved: " + ($resolved.NotFoundUsers -join ', ') + "`nContinue anyway?"
+                $continueResult = [System.Windows.Forms.MessageBox]::Show($msg, "Users Not Found", [System.Windows.Forms.MessageBoxButtons]::YesNo)
+                if ($continueResult -eq [System.Windows.Forms.DialogResult]::No) { return }
+            }
+            if ($resolved.ResolvedUserIds.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("No resolvable users were provided.", "Validation Error")
+                return
+            }
+
+            # 1) Create the new named location
+            $createLocationBody = @{
+                "@odata.type" = "#microsoft.graph.countryNamedLocation"
+                displayName = $newLocationName
+                countriesAndRegions = $countryCodes
+                includeUnknownCountriesAndRegions = $includeUnknown
+            }
+            $locJson = $createLocationBody | ConvertTo-Json -Depth 10
+            Write-Host ("Creating new named location: " + $locJson) -ForegroundColor Cyan
+            $locUri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations"
+            $newLocation = Invoke-MgGraphRequest -Method POST -Uri $locUri -Body $locJson -ContentType "application/json"
+            $newLocationId = $newLocation.id
+            Write-Host ("New location created with ID: " + $newLocationId) -ForegroundColor Green
+
+            # 2) Build new policy body based on existing policy, but with adjusted users/locations
+            $newPolicyBody = @{
+                displayName = $newPolicyName
+                state = "disabled"  # Safety first
+            }
+
+            $userConditions = @{}
+
+            # Include users: remove "All" and add specified users + existing specific users
+            $existingInclude = @()
+            if ($fullPolicy.Conditions.Users.IncludeUsers) {
+                $existingInclude += ($fullPolicy.Conditions.Users.IncludeUsers | Where-Object { $_ -ne $null -and $_ -ne "" -and $_ -ne "All" })
+            }
+            $includeUsers = @()
+            $includeUsers += $existingInclude
+            foreach ($uid in $resolved.ResolvedUserIds) {
+                if ($uid -notin $includeUsers) { $includeUsers += $uid }
+            }
+            if ($includeUsers.Count -eq 0) { $includeUsers = @("All") }
+            $userConditions.includeUsers = $includeUsers
+
+            # Preserve existing groups/exclusions
+            if ($fullPolicy.Conditions.Users.ExcludeUsers) { $userConditions.excludeUsers = $fullPolicy.Conditions.Users.ExcludeUsers }
+            if ($fullPolicy.Conditions.Users.IncludeGroups) { $userConditions.includeGroups = $fullPolicy.Conditions.Users.IncludeGroups }
+            if ($fullPolicy.Conditions.Users.ExcludeGroups) { $userConditions.excludeGroups = $fullPolicy.Conditions.Users.ExcludeGroups }
+            if ($fullPolicy.Conditions.Users.IncludeRoles) { $userConditions.includeRoles = $fullPolicy.Conditions.Users.IncludeRoles }
+            if ($fullPolicy.Conditions.Users.ExcludeRoles) { $userConditions.excludeRoles = $fullPolicy.Conditions.Users.ExcludeRoles }
+
+            $conditions = @{}
+            $conditions.users = $userConditions
+
+            # Applications (must have includeApplications)
+            $appConditions = @{}
+            if ($fullPolicy.Conditions.Applications) {
+                if ($fullPolicy.Conditions.Applications.IncludeApplications -and $fullPolicy.Conditions.Applications.IncludeApplications.Count -gt 0) {
+                    $appConditions.includeApplications = @($fullPolicy.Conditions.Applications.IncludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
+                }
+                if ($fullPolicy.Conditions.Applications.ExcludeApplications -and $fullPolicy.Conditions.Applications.ExcludeApplications.Count -gt 0) {
+                    $appConditions.excludeApplications = @($fullPolicy.Conditions.Applications.ExcludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
+                }
+            }
+            if (-not $appConditions.includeApplications -or $appConditions.includeApplications.Count -eq 0) {
+                # Minimal valid CA policy requires includeApplications; default to All if source was empty
+                $appConditions.includeApplications = @("All")
+            }
+            $conditions.applications = $appConditions
+
+            # Locations
+            if ($fullPolicy.Conditions.Locations) {
+                $locationConditions = @{}
+                if ($fullPolicy.Conditions.Locations.IncludeLocations -and $fullPolicy.Conditions.Locations.IncludeLocations.Count -gt 0) {
+                    $includeLocations = @($fullPolicy.Conditions.Locations.IncludeLocations | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    $includeLocations = $includeLocations | ForEach-Object { if ($_ -eq $locData.Id) { $newLocationId } else { $_ } }
+                    $locationConditions.includeLocations = $includeLocations
+                }
+                if ($fullPolicy.Conditions.Locations.ExcludeLocations -and $fullPolicy.Conditions.Locations.ExcludeLocations.Count -gt 0) {
+                    $excludeLocations = @($fullPolicy.Conditions.Locations.ExcludeLocations | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    $excludeLocations = $excludeLocations | ForEach-Object { if ($_ -eq $locData.Id) { $newLocationId } else { $_ } }
+                    $locationConditions.excludeLocations = $excludeLocations
+                }
+                if ($locationConditions.Count -gt 0) { $conditions.locations = $locationConditions }
+            }
+
+            # Platforms
+            if ($fullPolicy.Conditions.Platforms) {
+                $platformConditions = @{}
+                if ($fullPolicy.Conditions.Platforms.IncludePlatforms -and $fullPolicy.Conditions.Platforms.IncludePlatforms.Count -gt 0) {
+                    $platformConditions.includePlatforms = @($fullPolicy.Conditions.Platforms.IncludePlatforms | Where-Object { $_ -ne $null -and $_ -ne "" })
+                }
+                if ($fullPolicy.Conditions.Platforms.ExcludePlatforms -and $fullPolicy.Conditions.Platforms.ExcludePlatforms.Count -gt 0) {
+                    $platformConditions.excludePlatforms = @($fullPolicy.Conditions.Platforms.ExcludePlatforms | Where-Object { $_ -ne $null -and $_ -ne "" })
+                }
+                if ($platformConditions.Count -gt 0) { $conditions.platforms = $platformConditions }
+            }
+
+            if ($conditions.Count -gt 0) { $newPolicyBody.conditions = $conditions }
+
+            # Grant controls (must exist; default to block if missing)
+            $grantControls = @{}
+            if ($fullPolicy.GrantControls) {
+                $grantControls.operator = ($fullPolicy.GrantControls.Operator) ? $fullPolicy.GrantControls.Operator : "OR"
+                if ($fullPolicy.GrantControls.BuiltInControls) { $grantControls.builtInControls = @($fullPolicy.GrantControls.BuiltInControls | Where-Object { $_ -ne $null -and $_ -ne "" }) }
+                if ($fullPolicy.GrantControls.CustomAuthenticationFactors) { $grantControls.customAuthenticationFactors = @($fullPolicy.GrantControls.CustomAuthenticationFactors | Where-Object { $_ -ne $null -and $_ -ne "" }) }
+                if ($fullPolicy.GrantControls.TermsOfUse) { $grantControls.termsOfUse = @($fullPolicy.GrantControls.TermsOfUse | Where-Object { $_ -ne $null -and $_ -ne "" }) }
+            }
+            if (-not $grantControls.operator) { $grantControls.operator = "OR" }
+            if (-not $grantControls.builtInControls -and -not $grantControls.customAuthenticationFactors -and -not $grantControls.termsOfUse) {
+                # If source grant controls were empty, require MFA/Block is typical; use block to stay safe
+                $grantControls.builtInControls = @("block")
+            }
+            $newPolicyBody.grantControls = $grantControls
+
+            # Session controls (simple copy)
+            if ($fullPolicy.SessionControls) {
+                $sessionControls = @{}
+                if ($fullPolicy.SessionControls.ApplicationEnforcedRestrictions -and $fullPolicy.SessionControls.ApplicationEnforcedRestrictions.IsEnabled -ne $null) {
+                    $sessionControls.applicationEnforcedRestrictions = @{ isEnabled = $fullPolicy.SessionControls.ApplicationEnforcedRestrictions.IsEnabled }
+                }
+                if ($fullPolicy.SessionControls.CloudAppSecurity -and $fullPolicy.SessionControls.CloudAppSecurity.IsEnabled -ne $null) {
+                    $cloudApp = @{ isEnabled = $fullPolicy.SessionControls.CloudAppSecurity.IsEnabled }
+                    if ($fullPolicy.SessionControls.CloudAppSecurity.CloudAppSecurityType) { $cloudApp.cloudAppSecurityType = $fullPolicy.SessionControls.CloudAppSecurity.CloudAppSecurityType }
+                    $sessionControls.cloudAppSecurity = $cloudApp
+                }
+                if ($fullPolicy.SessionControls.SignInFrequency -and $fullPolicy.SessionControls.SignInFrequency.IsEnabled -ne $null) {
+                    $signInFreq = @{ isEnabled = $fullPolicy.SessionControls.SignInFrequency.IsEnabled }
+                    if ($fullPolicy.SessionControls.SignInFrequency.Type) { $signInFreq.type = $fullPolicy.SessionControls.SignInFrequency.Type }
+                    if ($fullPolicy.SessionControls.SignInFrequency.Value -ne $null) { $signInFreq.value = $fullPolicy.SessionControls.SignInFrequency.Value }
+                    $sessionControls.signInFrequency = $signInFreq
+                }
+                if ($fullPolicy.SessionControls.PersistentBrowser -and $fullPolicy.SessionControls.PersistentBrowser.IsEnabled -ne $null) {
+                    $persistent = @{ isEnabled = $fullPolicy.SessionControls.PersistentBrowser.IsEnabled }
+                    if ($fullPolicy.SessionControls.PersistentBrowser.Mode) { $persistent.mode = $fullPolicy.SessionControls.PersistentBrowser.Mode }
+                    $sessionControls.persistentBrowser = $persistent
+                }
+                if ($sessionControls.Count -gt 0) { $newPolicyBody.sessionControls = $sessionControls }
+            }
+
+            function Remove-NullGraphValues {
+                param($obj)
+                if ($obj -eq $null) { return $null }
+                if ($obj -is [hashtable]) {
+                    $clean = @{}
+                    foreach ($k in $obj.Keys) {
+                        $val = Remove-NullGraphValues $obj[$k]
+                        if ($val -ne $null) { $clean[$k] = $val }
+                    }
+                    return ($clean.Count -gt 0) ? $clean : $null
+                }
+                if ($obj -is [array] -or $obj -is [System.Collections.ArrayList]) {
+                    $arr = @()
+                    foreach ($item in $obj) {
+                        $val = Remove-NullGraphValues $item
+                        if ($val -ne $null) { $arr += $val }
+                    }
+                    return ($arr.Count -gt 0) ? ,$arr : $null
+                }
+                return $obj
+            }
+
+            $cleanPolicy = Remove-NullGraphValues $newPolicyBody
+            $policyJson = $cleanPolicy | ConvertTo-Json -Depth 15
+            Write-Host ("Creating new policy with body (truncated to 800 chars): " + $policyJson.Substring(0, [Math]::Min(800, $policyJson.Length))) -ForegroundColor Cyan
+
+            $policyUri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies"
+            $createdPolicy = Invoke-MgGraphRequest -Method POST -Uri $policyUri -Body $policyJson -ContentType "application/json"
+            $newPolicyId = $createdPolicy.id
+            Write-Host ("New policy created with ID: " + $newPolicyId) -ForegroundColor Green
+
+            # 3) Exclude the same users from the original policy
+            $origPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId
+            $currentExclude = @()
+            if ($origPolicy.Conditions.Users.ExcludeUsers) { $currentExclude += $origPolicy.Conditions.Users.ExcludeUsers }
+            foreach ($uid in $resolved.ResolvedUserIds) {
+                if ($uid -notin $currentExclude) { $currentExclude += $uid }
+            }
+
+            $origUserConditions = @{
+                IncludeUsers = $origPolicy.Conditions.Users.IncludeUsers
+                ExcludeUsers = $currentExclude
+            }
+            if ($origPolicy.Conditions.Users.IncludeGroups) { $origUserConditions.IncludeGroups = $origPolicy.Conditions.Users.IncludeGroups }
+            if ($origPolicy.Conditions.Users.ExcludeGroups) { $origUserConditions.ExcludeGroups = $origPolicy.Conditions.Users.ExcludeGroups }
+            if ($origPolicy.Conditions.Users.IncludeRoles) { $origUserConditions.IncludeRoles = $origPolicy.Conditions.Users.IncludeRoles }
+            if ($origPolicy.Conditions.Users.ExcludeRoles) { $origUserConditions.ExcludeRoles = $origPolicy.Conditions.Users.ExcludeRoles }
+
+            Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $origUserConditions }
+            Write-Host "Users excluded from original policy." -ForegroundColor Green
+
+            $summary = "Geo-IP exception created successfully!`n`nNew location: $newLocationName`nNew policy: $newPolicyName (disabled)`nUsers were excluded from the original policy."
+            [System.Windows.Forms.MessageBox]::Show($summary, "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+
+            $form.Close()
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Error creating exception flow: $_", "Error")
+        }
+    })
+
+    $form.ShowDialog() | Out-Null
+
+    # Refresh UI after the dialog closes
+    Refresh-NamedLocationsList $script:namedLocationsListView
+    Refresh-PoliciesList $listView
+}
+
 function Rename-SelectedPolicy {
     param($listView)
     
@@ -2407,9 +2853,18 @@ function Create-MainForm {
     })
     $policiesTab.Controls.Add($polCopyButton)
 
+    $polExceptionButton = New-Object System.Windows.Forms.Button
+    $polExceptionButton.Text = "Geo-IP Exception"
+    $polExceptionButton.Location = New-Object System.Drawing.Point(630, 15)
+    $polExceptionButton.Size = New-Object System.Drawing.Size(120, 25)
+    $polExceptionButton.Add_Click({
+        Create-GeoIpExceptionForPolicy $script:policiesListView
+    })
+    $policiesTab.Controls.Add($polExceptionButton)
+
     $polDeleteButton = New-Object System.Windows.Forms.Button
     $polDeleteButton.Text = "Delete Policy"
-    $polDeleteButton.Location = New-Object System.Drawing.Point(630, 15)
+    $polDeleteButton.Location = New-Object System.Drawing.Point(760, 15)
     $polDeleteButton.Size = New-Object System.Drawing.Size(100, 25)
     $polDeleteButton.ForeColor = [System.Drawing.Color]::DarkRed
     $polDeleteButton.Add_Click({
