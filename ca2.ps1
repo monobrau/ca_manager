@@ -79,7 +79,7 @@ function Show-InputBox {
     
     # Try to use native InputBox if Microsoft.VisualBasic is available
     try {
-        if ([System.Management.Automation.PSTypeName]'Microsoft.VisualBasic.Interaction').Type) {
+        if (([System.Management.Automation.PSTypeName]'Microsoft.VisualBasic.Interaction').Type) {
             return [Microsoft.VisualBasic.Interaction]::InputBox($Prompt, $Title, $DefaultValue)
         }
     } catch {
