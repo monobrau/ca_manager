@@ -1900,7 +1900,7 @@ function Create-GeoIpExceptionForPolicy {
     }
 
     $locationListBox.Add_SelectedIndexChanged($updateLocationUi)
-    $updateLocationUi.Invoke()
+    &$updateLocationUi.Invoke()
 
     # Country picker handler
     $countriesButton.Add_Click({
