@@ -148,8 +148,8 @@ foreach ($moduleName in $requiredModules) {
             # Check if module is available before trying to import
             $moduleAvailable = Get-Module -ListAvailable -Name $moduleName -ErrorAction SilentlyContinue
             if ($moduleAvailable) {
-                # Import module with -SkipEditionCheck to bypass PackageManagement format file issues
-                Import-Module $moduleName -SkipEditionCheck -ErrorAction Stop
+                # Import module (PowerShell 5.1 doesn't support -SkipEditionCheck)
+                Import-Module $moduleName -ErrorAction Stop
                 $loadedCount++
             } else {
                 $failedModules += $moduleName
