@@ -65,7 +65,7 @@ try {
 Write-Host "Checking for Microsoft.Graph module..." -ForegroundColor Cyan
 
 # Refresh module cache - sometimes needed when running as EXE
-$null = Get-Module -ListAvailable -Force | Out-Null
+$null = Get-Module -ListAvailable | Out-Null
 
 # Check all module paths explicitly (EXE might have different PSModulePath)
 $modulePaths = $env:PSModulePath -split ';'
