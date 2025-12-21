@@ -105,37 +105,39 @@ if ($pathsToAdd.Count -gt 0) {
 $modulesLoaded = $false
 $moduleError = $null
 
-# Try to import the modules
-try {
-    # Try to import Microsoft.Graph (this will import all sub-modules)
-    Import-Module Microsoft.Graph -ErrorAction Stop
-    Write-Host "Microsoft.Graph module loaded successfully." -ForegroundColor Green
+# Import only the specific sub-modules we need (not the full Microsoft.Graph)
+# This avoids hitting PowerShell's function limit (~4096 functions)
+Write-Host "Importing required Microsoft.Graph sub-modules..." -ForegroundColor Cyan
+$requiredModules = @(
+    "Microsoft.Graph.Identity.SignIns",
+    "Microsoft.Graph.Users"
+)
+$loadedCount = 0
+$failedModules = @()
+
+foreach ($moduleName in $requiredModules) {
+    try {
+        Import-Module $moduleName -ErrorAction Stop
+        Write-Host "  Loaded: $moduleName" -ForegroundColor Green
+        $loadedCount++
+    } catch {
+        $errorMsg = $_.Exception.Message
+        Write-Host "  Failed: $moduleName" -ForegroundColor Yellow
+        Write-Host "    Error: $errorMsg" -ForegroundColor Yellow
+        $failedModules += $moduleName
+    }
+}
+
+if ($loadedCount -eq $requiredModules.Count) {
+    Write-Host "All required modules loaded successfully." -ForegroundColor Green
     $modulesLoaded = $true
-} catch {
-    $moduleError = $_.Exception.Message
-    Write-Host "Could not import Microsoft.Graph module." -ForegroundColor Yellow
-    Write-Host "Error: $moduleError" -ForegroundColor Yellow
-    Write-Host ""
-    
-    # Try importing sub-modules individually
-    Write-Host "Attempting to import sub-modules individually..." -ForegroundColor Cyan
-    $subModules = @("Microsoft.Graph.Identity.SignIns", "Microsoft.Graph.Users")
-    $loadedCount = 0
-    
-    foreach ($moduleName in $subModules) {
-        try {
-            Import-Module $moduleName -ErrorAction Stop
-            Write-Host "  Loaded: $moduleName" -ForegroundColor Green
-            $loadedCount++
-        } catch {
-            Write-Host "  Failed: $moduleName - $($_.Exception.Message)" -ForegroundColor Yellow
-        }
-    }
-    
-    if ($loadedCount -gt 0) {
-        Write-Host "Some modules loaded. Continuing..." -ForegroundColor Green
-        $modulesLoaded = $true
-    }
+} elseif ($loadedCount -gt 0) {
+    Write-Host "Some modules loaded ($loadedCount of $($requiredModules.Count))." -ForegroundColor Yellow
+    Write-Host "The application may have limited functionality." -ForegroundColor Yellow
+    $modulesLoaded = $true
+} else {
+    $moduleError = "Could not load any required modules"
+    Write-Host "Failed to load required modules." -ForegroundColor Red
 }
 
 # Verify cmdlets are available
