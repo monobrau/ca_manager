@@ -97,7 +97,7 @@ if (-not $graphModule) {
 # Try to import the module to verify it's actually usable
 if ($graphModule) {
     try {
-        Import-Module Microsoft.Graph -ErrorAction Stop -Force
+        Import-Module Microsoft.Graph -ErrorAction Stop
         Write-Host "Microsoft.Graph module loaded successfully." -ForegroundColor Green
     } catch {
         Write-Host "Warning: Module found but could not be imported: $_" -ForegroundColor Yellow
@@ -141,7 +141,7 @@ foreach ($moduleName in $requiredModules) {
     if (-not $module) {
         # Try to import it - sometimes it's available but not listed
         try {
-            Import-Module $moduleName -ErrorAction Stop -Force
+            Import-Module $moduleName -ErrorAction Stop
             Write-Host "  Found and loaded: $moduleName" -ForegroundColor Green
         } catch {
             $missingModules += $moduleName
@@ -151,7 +151,7 @@ foreach ($moduleName in $requiredModules) {
         Write-Host "  Found: $moduleName" -ForegroundColor Green
         # Try to import it to verify it works
         try {
-            Import-Module $moduleName -ErrorAction Stop -Force
+            Import-Module $moduleName -ErrorAction Stop
         } catch {
             Write-Host "    Warning: Could not import $moduleName" -ForegroundColor Yellow
         }
