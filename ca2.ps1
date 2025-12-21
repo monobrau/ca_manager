@@ -111,6 +111,7 @@ function Show-InputBox {
     $okButton.Text = "OK"
     $okButton.Location = New-Object System.Drawing.Point(210, 75)
     $okButton.Size = New-Object System.Drawing.Size(75, 23)
+    $okButton.BackColor = [System.Drawing.Color]::LightGreen
     $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $form.Controls.Add($okButton)
 
@@ -118,6 +119,7 @@ function Show-InputBox {
     $cancelButton.Text = "Cancel"
     $cancelButton.Location = New-Object System.Drawing.Point(295, 75)
     $cancelButton.Size = New-Object System.Drawing.Size(75, 23)
+    $cancelButton.BackColor = [System.Drawing.Color]::LightGray
     $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $form.Controls.Add($cancelButton)
 
@@ -279,6 +281,7 @@ function Show-ReconnectDialog {
     $cancelButton.Text = "Cancel"
     $cancelButton.Location = New-Object System.Drawing.Point(295, 120)
     $cancelButton.Size = New-Object System.Drawing.Size(75, 23)
+    $cancelButton.BackColor = [System.Drawing.Color]::LightGray
     $cancelButton.Add_Click({ $form.Close() })
     $form.Controls.Add($cancelButton)
 
@@ -395,10 +398,18 @@ function Refresh-NamedLocationsList {
         Write-Host "Refreshing Named Locations list..." -ForegroundColor Yellow
         $locations = Get-MgIdentityConditionalAccessNamedLocation -All -ErrorAction Stop
         
+        # Get all policies to check references (cache for performance)
+        Write-Host "Loading policies to check references..." -ForegroundColor Yellow
+        $allPolicies = @()
+        try {
+            $allPolicies = Get-MgIdentityConditionalAccessPolicy -All -ErrorAction SilentlyContinue
+        } catch {
+            Write-Host "Warning: Could not load policies for reference checking: $_" -ForegroundColor Yellow
+        }
+        
         foreach ($location in $locations) {
             try {
                 $item = New-Object System.Windows.Forms.ListViewItem($location.DisplayName)
-                $item.SubItems.Add($location.Id) | Out-Null
                 
                 $odataType = $location.AdditionalProperties.'@odata.type'
                 if ($odataType -eq '#microsoft.graph.countryNamedLocation') {
@@ -411,6 +422,37 @@ function Refresh-NamedLocationsList {
                 } else {
                     $item.SubItems.Add("Unknown") | Out-Null
                     $item.SubItems.Add("") | Out-Null
+                }
+                
+                # Find policies that reference this location
+                $referencingPolicies = @()
+                foreach ($policy in $allPolicies) {
+                    if ($policy.Conditions -and $policy.Conditions.Locations) {
+                        $isReferenced = $false
+                        if ($policy.Conditions.Locations.IncludeLocations) {
+                            $includeLocs = $policy.Conditions.Locations.IncludeLocations
+                            if ($includeLocs -is [string]) { $includeLocs = @($includeLocs) }
+                            if ($includeLocs -contains $location.Id) {
+                                $isReferenced = $true
+                            }
+                        }
+                        if ($policy.Conditions.Locations.ExcludeLocations) {
+                            $excludeLocs = $policy.Conditions.Locations.ExcludeLocations
+                            if ($excludeLocs -is [string]) { $excludeLocs = @($excludeLocs) }
+                            if ($excludeLocs -contains $location.Id) {
+                                $isReferenced = $true
+                            }
+                        }
+                        if ($isReferenced) {
+                            $referencingPolicies += $policy.DisplayName
+                        }
+                    }
+                }
+                
+                if ($referencingPolicies.Count -gt 0) {
+                    $item.SubItems.Add(($referencingPolicies -join '; ')) | Out-Null
+                } else {
+                    $item.SubItems.Add("None") | Out-Null
                 }
                 
                 $item.Tag = $location
@@ -798,6 +840,7 @@ function Show-CountrySelectionDialog {
     $okButton.Text = "OK"
     $okButton.Location = New-Object System.Drawing.Point(420, 420)
     $okButton.Size = New-Object System.Drawing.Size(75, 30)
+    $okButton.BackColor = [System.Drawing.Color]::LightGreen
     $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $form.Controls.Add($okButton)
 
@@ -805,6 +848,7 @@ function Show-CountrySelectionDialog {
     $cancelButton.Text = "Cancel"
     $cancelButton.Location = New-Object System.Drawing.Point(505, 420)
     $cancelButton.Size = New-Object System.Drawing.Size(75, 30)
+    $cancelButton.BackColor = [System.Drawing.Color]::LightGray
     $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $form.Controls.Add($cancelButton)
 
@@ -875,6 +919,7 @@ function Show-CountryLocationDialog {
     $selectCountriesButton.Text = "Select Countries"
     $selectCountriesButton.Location = New-Object System.Drawing.Point(370, 83)
     $selectCountriesButton.Size = New-Object System.Drawing.Size(100, 25)
+    $selectCountriesButton.BackColor = [System.Drawing.Color]::LightSteelBlue
     $selectCountriesButton.Add_Click({
         # Get current countries from textbox
         $currentCountries = @()
@@ -927,6 +972,11 @@ function Show-CountryLocationDialog {
     $actionButton.Text = $Mode
     $actionButton.Location = New-Object System.Drawing.Point(310, 215)
     $actionButton.Size = New-Object System.Drawing.Size(75, 23)
+    if ($Mode -eq "Create") {
+        $actionButton.BackColor = [System.Drawing.Color]::LightGreen
+    } else {
+        $actionButton.BackColor = [System.Drawing.Color]::Orange
+    }
     $actionButton.Add_Click({
         if ([string]::IsNullOrWhiteSpace($nameTextBox.Text)) {
             [System.Windows.Forms.MessageBox]::Show("Please enter a display name.", "Validation Error")
@@ -1005,6 +1055,7 @@ function Show-CountryLocationDialog {
     $cancelButton.Text = "Cancel"
     $cancelButton.Location = New-Object System.Drawing.Point(395, 215)
     $cancelButton.Size = New-Object System.Drawing.Size(75, 23)
+    $cancelButton.BackColor = [System.Drawing.Color]::LightGray
     $cancelButton.Add_Click({ $form.Close() })
     $form.Controls.Add($cancelButton)
 
@@ -1155,7 +1206,8 @@ function Rename-SelectedNamedLocation {
 
     $selectedItem = $listView.SelectedItems[0]
     $currentName = $selectedItem.Text
-    $locationId = $selectedItem.SubItems[1].Text
+    $location = $selectedItem.Tag
+    $locationId = $location.Id
 
     $newName = Show-InputBox -Prompt "Enter new display name:" -Title "Rename Named Location" -DefaultValue $currentName
     
@@ -1197,40 +1249,149 @@ function Remove-SelectedNamedLocation {
     }
     
     if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select a Named Location to delete.", "No Selection")
+        [System.Windows.Forms.MessageBox]::Show("Please select one or more Named Locations to delete.", "No Selection")
         return
     }
 
-    $selectedItem = $listView.SelectedItems[0]
-    $locationName = $selectedItem.Text
-    $locationId = $selectedItem.SubItems[1].Text
-
-    $result = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to delete '" + $locationName + "'?", "Confirm Delete", [System.Windows.Forms.MessageBoxButtons]::YesNo)
+    $selectedCount = $listView.SelectedItems.Count
+    $confirmMessage = "Are you sure you want to delete $selectedCount Named Location(s)?`n`n"
+    if ($selectedCount -eq 1) {
+        $confirmMessage += "Location: " + $listView.SelectedItems[0].Text
+    } else {
+        $confirmMessage += "Locations:`n"
+        foreach ($item in $listView.SelectedItems) {
+            $confirmMessage += "  - " + $item.Text + "`n"
+        }
+    }
+    $confirmMessage += "`nThis action cannot be undone!"
+    
+    $result = [System.Windows.Forms.MessageBox]::Show($confirmMessage, "Confirm Delete", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
     
     if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
+        # Load all policies once for reference checking
+        Write-Host "Loading policies for reference checking..." -ForegroundColor Yellow
+        $allPolicies = @()
         try {
-            # Check if the location still exists before trying to delete
-            $existingLocation = Get-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locationId -ErrorAction SilentlyContinue
-            if (-not $existingLocation) {
-                [System.Windows.Forms.MessageBox]::Show("The selected Named Location no longer exists. Refreshing list.", "Already Deleted")
-                Refresh-NamedLocationsList $listView
-                return
-            }
-            
-            Remove-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locationId
-            [System.Windows.Forms.MessageBox]::Show("Named Location deleted successfully!", "Success")
-            
-            # Small delay before refresh
-            Start-Sleep -Seconds 1
-            Refresh-NamedLocationsList $listView
+            $allPolicies = Get-MgIdentityConditionalAccessPolicy -All -ErrorAction Stop
         } catch {
-            if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*") {
-                [System.Windows.Forms.MessageBox]::Show("The Named Location was already deleted. Refreshing list.", "Already Deleted")
-                Refresh-NamedLocationsList $listView
-            } else {
-                [System.Windows.Forms.MessageBox]::Show("Error deleting Named Location: $_", "Error")
+            Write-Host "Warning: Could not load policies for reference checking: $_" -ForegroundColor Yellow
+        }
+        
+        $deletedCount = 0
+        $skippedCount = 0
+        $errorCount = 0
+        $referencedLocations = @()
+        $errors = @()
+        
+        # Process each selected location
+        foreach ($selectedItem in $listView.SelectedItems) {
+            $locationName = $selectedItem.Text
+            $location = $selectedItem.Tag
+            $locationId = $location.Id
+            
+            try {
+                # Check if the location still exists before trying to delete
+                $existingLocation = Get-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locationId -ErrorAction SilentlyContinue
+                if (-not $existingLocation) {
+                    Write-Host "Skipping '$locationName' - already deleted." -ForegroundColor Yellow
+                    $skippedCount++
+                    continue
+                }
+                
+                # Check if any policies reference this location
+                $referencingPolicies = @()
+                foreach ($policy in $allPolicies) {
+                    $hasReference = $false
+                    if ($policy.Conditions -and $policy.Conditions.Locations) {
+                        if ($policy.Conditions.Locations.IncludeLocations) {
+                            $includeLocs = $policy.Conditions.Locations.IncludeLocations
+                            if ($includeLocs -is [string]) { $includeLocs = @($includeLocs) }
+                            if ($includeLocs -contains $locationId) {
+                                $hasReference = $true
+                            }
+                        }
+                        if ($policy.Conditions.Locations.ExcludeLocations) {
+                            $excludeLocs = $policy.Conditions.Locations.ExcludeLocations
+                            if ($excludeLocs -is [string]) { $excludeLocs = @($excludeLocs) }
+                            if ($excludeLocs -contains $locationId) {
+                                $hasReference = $true
+                            }
+                        }
+                    }
+                    if ($hasReference) {
+                        $referencingPolicies += $policy
+                    }
+                }
+                
+                if ($referencingPolicies.Count -gt 0) {
+                    $policyNames = $referencingPolicies | ForEach-Object { $_.DisplayName }
+                    $referencedLocations += [PSCustomObject]@{
+                        LocationName = $locationName
+                        PolicyNames = $policyNames
+                    }
+                    Write-Host "Skipping '$locationName' - referenced by policies: $($policyNames -join ', ')" -ForegroundColor Yellow
+                    $skippedCount++
+                    continue
+                }
+                
+                # Delete the location
+                Remove-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locationId -ErrorAction Stop
+                Write-Host "Deleted '$locationName' successfully." -ForegroundColor Green
+                $deletedCount++
+                
+                # Small delay between deletions to avoid rate limiting
+                if ($deletedCount -lt $selectedCount) {
+                    Start-Sleep -Milliseconds 500
+                }
+                
+            } catch {
+                if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*" -or $_.Exception.Message -like "*does not exist*") {
+                    Write-Host "Skipping '$locationName' - already deleted." -ForegroundColor Yellow
+                    $skippedCount++
+                } elseif ($_.Exception.Message -like "*referenced*" -or $_.Exception.Message -like "*1178*") {
+                    Write-Host "Skipping '$locationName' - referenced by policies." -ForegroundColor Yellow
+                    $skippedCount++
+                } else {
+                    Write-Host "Error deleting '$locationName': $_" -ForegroundColor Red
+                    $errors += "$locationName : $($_.Exception.Message)"
+                    $errorCount++
+                }
             }
         }
+        
+        # Show summary message
+        $summaryMessage = "Deletion Summary:`n`n"
+        $summaryMessage += "Successfully deleted: $deletedCount`n"
+        if ($skippedCount -gt 0) {
+            $summaryMessage += "Skipped: $skippedCount`n"
+        }
+        if ($errorCount -gt 0) {
+            $summaryMessage += "Errors: $errorCount`n"
+        }
+        
+        if ($referencedLocations.Count -gt 0) {
+            $summaryMessage += "`nLocations skipped due to policy references:`n"
+            foreach ($ref in $referencedLocations) {
+                $summaryMessage += "  - $($ref.LocationName): $($ref.PolicyNames -join ', ')`n"
+            }
+        }
+        
+        if ($errors.Count -gt 0) {
+            $summaryMessage += "`nErrors encountered:`n"
+            foreach ($err in $errors) {
+                $summaryMessage += "  - $err`n"
+            }
+        }
+        
+        if ($deletedCount -gt 0) {
+            [System.Windows.Forms.MessageBox]::Show($summaryMessage, "Deletion Complete", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        } else {
+            [System.Windows.Forms.MessageBox]::Show($summaryMessage, "No Locations Deleted", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        }
+        
+        # Refresh the list
+        Start-Sleep -Seconds 1
+        Refresh-NamedLocationsList $listView
     }
 }
 
@@ -1245,6 +1406,21 @@ function Refresh-PoliciesList {
     $listView.Items.Clear()
     
     try {
+        # Cache all locations for reference resolution
+        Write-Host "Loading locations for reference checking..." -ForegroundColor Yellow
+        $allLocations = @{}
+        try {
+            $locations = Get-MgIdentityConditionalAccessNamedLocation -All -ErrorAction SilentlyContinue
+            foreach ($loc in $locations) {
+                $allLocations[$loc.Id] = $loc.DisplayName
+            }
+            # Also add special locations
+            $allLocations["All"] = "All"
+            $allLocations["AllTrusted"] = "All Trusted IPs"
+        } catch {
+            Write-Host "Warning: Could not load locations for reference checking: $_" -ForegroundColor Yellow
+        }
+        
         $policies = Get-MgIdentityConditionalAccessPolicy -All
         foreach ($policy in $policies) {
             $item = New-Object System.Windows.Forms.ListViewItem($policy.DisplayName)
@@ -1264,6 +1440,39 @@ function Refresh-PoliciesList {
             if ($excludeUsers) {
                 $excludeInfo = Get-UserDisplayInfo -UserIds $excludeUsers
                 $item.SubItems.Add(($excludeInfo -join '; ')) | Out-Null
+            } else {
+                $item.SubItems.Add("None") | Out-Null
+            }
+            
+            # Get referenced locations
+            $referencedLocations = @()
+            if ($policy.Conditions -and $policy.Conditions.Locations) {
+                if ($policy.Conditions.Locations.IncludeLocations) {
+                    $includeLocs = $policy.Conditions.Locations.IncludeLocations
+                    if ($includeLocs -is [string]) { $includeLocs = @($includeLocs) }
+                    foreach ($locId in $includeLocs) {
+                        if ($allLocations.ContainsKey($locId)) {
+                            $referencedLocations += $allLocations[$locId] + " (Include)"
+                        } else {
+                            $referencedLocations += $locId + " (Include)"
+                        }
+                    }
+                }
+                if ($policy.Conditions.Locations.ExcludeLocations) {
+                    $excludeLocs = $policy.Conditions.Locations.ExcludeLocations
+                    if ($excludeLocs -is [string]) { $excludeLocs = @($excludeLocs) }
+                    foreach ($locId in $excludeLocs) {
+                        if ($allLocations.ContainsKey($locId)) {
+                            $referencedLocations += $allLocations[$locId] + " (Exclude)"
+                        } else {
+                            $referencedLocations += $locId + " (Exclude)"
+                        }
+                    }
+                }
+            }
+            
+            if ($referencedLocations.Count -gt 0) {
+                $item.SubItems.Add(($referencedLocations -join '; ')) | Out-Null
             } else {
                 $item.SubItems.Add("None") | Out-Null
             }
@@ -1340,8 +1549,25 @@ function Remove-SelectedPolicy {
                 }
             }
             
-            # Perform the deletion
-            Remove-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Confirm:$false
+            # Perform the deletion with error handling
+            try {
+                Remove-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Confirm:$false -ErrorAction Stop
+            } catch {
+                # Check if error is "does not exist" - treat as success since policy is already gone
+                if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*" -or $_.Exception.Message -like "*does not exist*") {
+                    Write-Host "Policy was already deleted (does not exist). Treating as successful deletion." -ForegroundColor Yellow
+                    # Continue to success message below
+                } else {
+                    throw  # Re-throw other errors to be caught by outer catch
+                }
+            }
+            
+            # Verify deletion succeeded by checking if policy still exists
+            Start-Sleep -Milliseconds 500  # Brief delay for API propagation
+            $verifyPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -ErrorAction SilentlyContinue
+            if ($verifyPolicy) {
+                throw "Policy deletion appeared to succeed but policy still exists. It may have been recreated or deletion is pending."
+            }
             
             Write-Host "✅ Policy deleted successfully!" -ForegroundColor Green
             [System.Windows.Forms.MessageBox]::Show("Conditional Access Policy '$policyName' deleted successfully!", "Success")
@@ -1353,8 +1579,8 @@ function Remove-SelectedPolicy {
         } catch {
             Write-Host "❌ Error deleting policy: $($_.Exception.Message)" -ForegroundColor Red
             
-            if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*") {
-                [System.Windows.Forms.MessageBox]::Show("The Conditional Access Policy was already deleted. Refreshing list.", "Already Deleted")
+            if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*" -or $_.Exception.Message -like "*does not exist*") {
+                [System.Windows.Forms.MessageBox]::Show("The Conditional Access Policy '$policyName' was already deleted or does not exist. Refreshing list.", "Already Deleted")
                 Refresh-PoliciesList $listView
             } else {
                 $errorMessage = "Error deleting Conditional Access Policy:`n`n"
@@ -1869,6 +2095,7 @@ function Create-GeoIpExceptionForPolicy {
     $countriesButton.Text = "Select Countries"
     $countriesButton.Location = New-Object System.Drawing.Point(570, 313)
     $countriesButton.Size = New-Object System.Drawing.Size(120, 24)
+    $countriesButton.BackColor = [System.Drawing.Color]::LightSteelBlue
     $form.Controls.Add($countriesButton)
 
     $includeUnknownCheckbox = New-Object System.Windows.Forms.CheckBox
@@ -1886,8 +2113,36 @@ function Create-GeoIpExceptionForPolicy {
 
     $usersTextBox = New-Object System.Windows.Forms.RichTextBox
     $usersTextBox.Location = New-Object System.Drawing.Point(10, 400)
-    $usersTextBox.Size = New-Object System.Drawing.Size(680, 120)
+    $usersTextBox.Size = New-Object System.Drawing.Size(550, 120)
     $form.Controls.Add($usersTextBox)
+    
+    $usersSearchButton = New-Object System.Windows.Forms.Button
+    $usersSearchButton.Text = "Search Users"
+    $usersSearchButton.Location = New-Object System.Drawing.Point(570, 400)
+    $usersSearchButton.Size = New-Object System.Drawing.Size(120, 30)
+    $usersSearchButton.BackColor = [System.Drawing.Color]::LightBlue
+    $usersSearchButton.Add_Click({
+        $foundUsers = Show-UserSearchDialog -Title "Search Users to Add"
+        if ($foundUsers -and $foundUsers.Count -gt 0) {
+            $existingText = $usersTextBox.Text.Trim()
+            $newLines = @()
+            if ($existingText) {
+                $newLines += $existingText.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            }
+            foreach ($user in $foundUsers) {
+                # Add userPrincipalName if available, otherwise display name
+                $userIdentifier = $user.UserPrincipalName
+                if ([string]::IsNullOrWhiteSpace($userIdentifier)) {
+                    $userIdentifier = $user.DisplayName
+                }
+                if ($userIdentifier -notin $newLines) {
+                    $newLines += $userIdentifier
+                }
+            }
+            $usersTextBox.Text = ($newLines -join "`n")
+        }
+    })
+    $form.Controls.Add($usersSearchButton)
 
 # Helper to seed UI from selected location
 function Invoke-GeoIpLocationUiUpdate {
@@ -1920,12 +2175,14 @@ Invoke-GeoIpLocationUiUpdate
     $okButton.Text = "Create Exception"
     $okButton.Location = New-Object System.Drawing.Point(500, 540)
     $okButton.Size = New-Object System.Drawing.Size(90, 30)
+    $okButton.BackColor = [System.Drawing.Color]::LightGreen
     $form.Controls.Add($okButton)
 
     $cancelButton = New-Object System.Windows.Forms.Button
     $cancelButton.Text = "Cancel"
     $cancelButton.Location = New-Object System.Drawing.Point(600, 540)
     $cancelButton.Size = New-Object System.Drawing.Size(90, 30)
+    $cancelButton.BackColor = [System.Drawing.Color]::LightGray
     $cancelButton.Add_Click({ $form.Close() })
     $form.Controls.Add($cancelButton)
 
@@ -1964,6 +2221,7 @@ Invoke-GeoIpLocationUiUpdate
         $newPolicyName = $policyNameTextBox.Text
         $includeUnknown = $includeUnknownCheckbox.Checked
 
+        $policyJson = $null
         try {
             $resolved = Resolve-UserInput -UserInputs $userInputs
             if ($resolved.NotFoundUsers.Count -gt 0) {
@@ -1990,14 +2248,53 @@ Invoke-GeoIpLocationUiUpdate
             $newLocationId = $newLocation.id
             Write-Host ("New location created with ID: " + $newLocationId) -ForegroundColor Green
 
+            # Wait for location to propagate (Microsoft Graph API sometimes needs a moment)
+            Write-Host "Waiting for location to propagate..." -ForegroundColor Yellow
+            $maxRetries = 5
+            $retryCount = 0
+            $locationExists = $false
+            while ($retryCount -lt $maxRetries -and -not $locationExists) {
+                Start-Sleep -Seconds 2
+                try {
+                    $verifyUri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/$newLocationId"
+                    $verifyLocation = Invoke-MgGraphRequest -Method GET -Uri $verifyUri
+                    if ($verifyLocation.id -eq $newLocationId) {
+                        $locationExists = $true
+                        Write-Host "Location verified successfully." -ForegroundColor Green
+                    }
+                } catch {
+                    $retryCount++
+                    if ($retryCount -lt $maxRetries) {
+                        Write-Host "Location not yet available, retrying... ($retryCount/$maxRetries)" -ForegroundColor Yellow
+                    }
+                }
+            }
+            if (-not $locationExists) {
+                throw "Named location $newLocationId was created but could not be verified after $maxRetries attempts. Please try again."
+            }
+
             # 2) Build new policy body based on existing policy, but with adjusted users/locations
+            # Start with a minimal working policy structure (like the copy function)
             $newPolicyBody = @{
                 displayName = $newPolicyName
                 state = "disabled"  # Safety first
+                conditions = @{
+                    users = @{
+                        includeUsers = @("All")
+                    }
+                    applications = @{
+                        includeApplications = @("All")
+                    }
+                }
+                grantControls = @{
+                    operator = "OR"
+                    builtInControls = @("block")
+                }
             }
 
+            # Build user conditions
             $userConditions = @{}
-
+            
             # Include users: remove "All" and add specified users + existing specific users
             $existingInclude = @()
             if ($fullPolicy.Conditions.Users.IncludeUsers) {
@@ -2008,69 +2305,145 @@ Invoke-GeoIpLocationUiUpdate
             foreach ($uid in $resolved.ResolvedUserIds) {
                 if ($uid -notin $includeUsers) { $includeUsers += $uid }
             }
-            if ($includeUsers.Count -eq 0) { $includeUsers = @("All") }
+            if ($includeUsers.Count -eq 0) { 
+                $includeUsers = @("All") 
+            }
             $userConditions.includeUsers = $includeUsers
 
-            # Preserve existing groups/exclusions
-            if ($fullPolicy.Conditions.Users.ExcludeUsers) { $userConditions.excludeUsers = $fullPolicy.Conditions.Users.ExcludeUsers }
+            # IMPORTANT: According to Microsoft Graph API schema, when includeUsers contains specific users (not "All"),
+            # excludeUsers must be empty or omitted. Only preserve excludeUsers if includeUsers is "All"
+            if ($includeUsers.Count -eq 1 -and $includeUsers[0] -eq "All") {
+                # Only preserve exclusions when including "All" users
+                if ($fullPolicy.Conditions.Users.ExcludeUsers) { 
+                    $excludeUsers = @($fullPolicy.Conditions.Users.ExcludeUsers | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    if ($excludeUsers.Count -gt 0) {
+                        $userConditions.excludeUsers = $excludeUsers
+                    }
+                }
+            }
+            # Otherwise, excludeUsers should not be set when including specific users
+            
+            # Preserve groups and roles (these are allowed with specific users)
             if ($fullPolicy.Conditions.Users.IncludeGroups) { $userConditions.includeGroups = $fullPolicy.Conditions.Users.IncludeGroups }
             if ($fullPolicy.Conditions.Users.ExcludeGroups) { $userConditions.excludeGroups = $fullPolicy.Conditions.Users.ExcludeGroups }
             if ($fullPolicy.Conditions.Users.IncludeRoles) { $userConditions.includeRoles = $fullPolicy.Conditions.Users.IncludeRoles }
             if ($fullPolicy.Conditions.Users.ExcludeRoles) { $userConditions.excludeRoles = $fullPolicy.Conditions.Users.ExcludeRoles }
 
-            $conditions = @{}
-            $conditions.users = $userConditions
+            # Update the conditions.users with the built user conditions
+            $newPolicyBody.conditions.users = $userConditions
 
-            # Applications
+            # Applications - update existing structure
             if ($fullPolicy.Conditions.Applications) {
                 $appConditions = @{}
                 if ($fullPolicy.Conditions.Applications.IncludeApplications -and $fullPolicy.Conditions.Applications.IncludeApplications.Count -gt 0) {
-                    $appConditions.includeApplications = @($fullPolicy.Conditions.Applications.IncludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    $includeApps = @($fullPolicy.Conditions.Applications.IncludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    if ($includeApps.Count -gt 0) {
+                        $appConditions.includeApplications = $includeApps
+                    }
                 }
                 if ($fullPolicy.Conditions.Applications.ExcludeApplications -and $fullPolicy.Conditions.Applications.ExcludeApplications.Count -gt 0) {
-                    $appConditions.excludeApplications = @($fullPolicy.Conditions.Applications.ExcludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    $excludeApps = @($fullPolicy.Conditions.Applications.ExcludeApplications | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    if ($excludeApps.Count -gt 0) {
+                        $appConditions.excludeApplications = $excludeApps
+                    }
                 }
-                if ($appConditions.Count -gt 0) { $conditions.applications = $appConditions }
+                if ($appConditions.Count -gt 0) { 
+                    $newPolicyBody.conditions.applications = $appConditions 
+                }
             }
 
-            # Locations
+            # Locations - update existing structure
             if ($fullPolicy.Conditions.Locations) {
                 $locationConditions = @{}
-                if ($fullPolicy.Conditions.Locations.IncludeLocations -and $fullPolicy.Conditions.Locations.IncludeLocations.Count -gt 0) {
-                    $includeLocations = @($fullPolicy.Conditions.Locations.IncludeLocations | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    $includeLocations = $includeLocations | ForEach-Object { if ($_ -eq $locData.Id) { $newLocationId } else { $_ } }
-                    $locationConditions.includeLocations = $includeLocations
+                if ($fullPolicy.Conditions.Locations.IncludeLocations) {
+                    # Handle both array and single string values - ensure it's always an array
+                    $includeLocationsRaw = $fullPolicy.Conditions.Locations.IncludeLocations
+                    if ($includeLocationsRaw -is [string]) {
+                        $includeLocationsRaw = @($includeLocationsRaw)
+                    }
+                    $includeLocations = [System.Collections.ArrayList]::new()
+                    foreach ($item in $includeLocationsRaw) {
+                        if ($item -ne $null -and $item -ne "") {
+                            $loc = if ($item -eq $locData.Id) { $newLocationId } else { $item }
+                            [void]$includeLocations.Add($loc)
+                        }
+                    }
+                    if ($includeLocations.Count -gt 0) {
+                        $locationConditions.includeLocations = $includeLocations.ToArray()
+                    }
                 }
-                if ($fullPolicy.Conditions.Locations.ExcludeLocations -and $fullPolicy.Conditions.Locations.ExcludeLocations.Count -gt 0) {
-                    $excludeLocations = @($fullPolicy.Conditions.Locations.ExcludeLocations | Where-Object { $_ -ne $null -and $_ -ne "" })
-                    $excludeLocations = $excludeLocations | ForEach-Object { if ($_ -eq $locData.Id) { $newLocationId } else { $_ } }
-                    $locationConditions.excludeLocations = $excludeLocations
+                if ($fullPolicy.Conditions.Locations.ExcludeLocations) {
+                    # Handle both array and single string values - ensure it's always an array
+                    $excludeLocationsRaw = $fullPolicy.Conditions.Locations.ExcludeLocations
+                    if ($excludeLocationsRaw -is [string]) {
+                        $excludeLocationsRaw = @($excludeLocationsRaw)
+                    }
+                    $excludeLocations = [System.Collections.ArrayList]::new()
+                    foreach ($item in $excludeLocationsRaw) {
+                        if ($item -ne $null -and $item -ne "") {
+                            $loc = if ($item -eq $locData.Id) { $newLocationId } else { $item }
+                            [void]$excludeLocations.Add($loc)
+                        }
+                    }
+                    if ($excludeLocations.Count -gt 0) {
+                        $locationConditions.excludeLocations = $excludeLocations.ToArray()
+                    }
                 }
-                if ($locationConditions.Count -gt 0) { $conditions.locations = $locationConditions }
+                if ($locationConditions.Count -gt 0) { 
+                    $newPolicyBody.conditions.locations = $locationConditions 
+                }
             }
 
-            # Platforms
+            # Platforms - update existing structure
             if ($fullPolicy.Conditions.Platforms) {
                 $platformConditions = @{}
                 if ($fullPolicy.Conditions.Platforms.IncludePlatforms -and $fullPolicy.Conditions.Platforms.IncludePlatforms.Count -gt 0) {
-                    $platformConditions.includePlatforms = @($fullPolicy.Conditions.Platforms.IncludePlatforms | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    $includePlatforms = @($fullPolicy.Conditions.Platforms.IncludePlatforms | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    if ($includePlatforms.Count -gt 0) {
+                        $platformConditions.includePlatforms = $includePlatforms
+                    }
                 }
                 if ($fullPolicy.Conditions.Platforms.ExcludePlatforms -and $fullPolicy.Conditions.Platforms.ExcludePlatforms.Count -gt 0) {
-                    $platformConditions.excludePlatforms = @($fullPolicy.Conditions.Platforms.ExcludePlatforms | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    $excludePlatforms = @($fullPolicy.Conditions.Platforms.ExcludePlatforms | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    if ($excludePlatforms.Count -gt 0) {
+                        $platformConditions.excludePlatforms = $excludePlatforms
+                    }
                 }
-                if ($platformConditions.Count -gt 0) { $conditions.platforms = $platformConditions }
+                if ($platformConditions.Count -gt 0) { 
+                    $newPolicyBody.conditions.platforms = $platformConditions 
+                }
             }
 
-            if ($conditions.Count -gt 0) { $newPolicyBody.conditions = $conditions }
-
-            # Grant controls
+            # Grant controls - update existing structure
             if ($fullPolicy.GrantControls) {
-                $grantControls = @{}
-                $grantControls.operator = ($fullPolicy.GrantControls.Operator) ? $fullPolicy.GrantControls.Operator : "OR"
-                if ($fullPolicy.GrantControls.BuiltInControls) { $grantControls.builtInControls = @($fullPolicy.GrantControls.BuiltInControls | Where-Object { $_ -ne $null -and $_ -ne "" }) }
-                if ($fullPolicy.GrantControls.CustomAuthenticationFactors) { $grantControls.customAuthenticationFactors = @($fullPolicy.GrantControls.CustomAuthenticationFactors | Where-Object { $_ -ne $null -and $_ -ne "" }) }
-                if ($fullPolicy.GrantControls.TermsOfUse) { $grantControls.termsOfUse = @($fullPolicy.GrantControls.TermsOfUse | Where-Object { $_ -ne $null -and $_ -ne "" }) }
-                $newPolicyBody.grantControls = $grantControls
+                # Operator
+                if ($fullPolicy.GrantControls.Operator) {
+                    $newPolicyBody.grantControls.operator = $fullPolicy.GrantControls.Operator
+                }
+                
+                # BuiltInControls is required - ensure it has at least one value
+                if ($fullPolicy.GrantControls.BuiltInControls -and $fullPolicy.GrantControls.BuiltInControls.Count -gt 0) {
+                    $builtInControls = @($fullPolicy.GrantControls.BuiltInControls | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    if ($builtInControls.Count -gt 0) {
+                        $newPolicyBody.grantControls.builtInControls = $builtInControls
+                    }
+                }
+                
+                # CustomAuthenticationFactors
+                if ($fullPolicy.GrantControls.CustomAuthenticationFactors -and $fullPolicy.GrantControls.CustomAuthenticationFactors.Count -gt 0) {
+                    $customAuth = @($fullPolicy.GrantControls.CustomAuthenticationFactors | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    if ($customAuth.Count -gt 0) { 
+                        $newPolicyBody.grantControls.customAuthenticationFactors = $customAuth 
+                    }
+                }
+                
+                # TermsOfUse
+                if ($fullPolicy.GrantControls.TermsOfUse -and $fullPolicy.GrantControls.TermsOfUse.Count -gt 0) {
+                    $termsOfUse = @($fullPolicy.GrantControls.TermsOfUse | Where-Object { $_ -ne $null -and $_ -ne "" })
+                    if ($termsOfUse.Count -gt 0) { 
+                        $newPolicyBody.grantControls.termsOfUse = $termsOfUse 
+                    }
+                }
             }
 
             # Session controls (simple copy)
@@ -2121,6 +2494,31 @@ Invoke-GeoIpLocationUiUpdate
             }
 
             $cleanPolicy = Remove-NullGraphValues $newPolicyBody
+            
+            # Validate required fields before sending (shouldn't be needed since we start with valid structure, but safety check)
+            if (-not $cleanPolicy.displayName) {
+                throw "Policy displayName is required but missing"
+            }
+            if (-not $cleanPolicy.state) {
+                throw "Policy state is required but missing"
+            }
+            if (-not $cleanPolicy.conditions -or -not $cleanPolicy.conditions.users) {
+                throw "Policy conditions.users is required but missing"
+            }
+            if (-not $cleanPolicy.grantControls -or -not $cleanPolicy.grantControls.builtInControls -or $cleanPolicy.grantControls.builtInControls.Count -eq 0) {
+                throw "Policy grantControls.builtInControls is required but missing or empty"
+            }
+            
+            # Ensure includeUsers is not empty (fallback safety)
+            if (-not $cleanPolicy.conditions.users.includeUsers -or $cleanPolicy.conditions.users.includeUsers.Count -eq 0) {
+                $cleanPolicy.conditions.users.includeUsers = @("All")
+            }
+            
+            # Ensure applications is present (fallback safety)
+            if (-not $cleanPolicy.conditions.applications) {
+                $cleanPolicy.conditions.applications = @{ includeApplications = @("All") }
+            }
+            
             $policyJson = $cleanPolicy | ConvertTo-Json -Depth 15
             Write-Host ("Creating new policy with body (truncated to 800 chars): " + $policyJson.Substring(0, [Math]::Min(800, $policyJson.Length))) -ForegroundColor Cyan
 
@@ -2154,7 +2552,40 @@ Invoke-GeoIpLocationUiUpdate
 
             $form.Close()
         } catch {
-            [System.Windows.Forms.MessageBox]::Show("Error creating exception flow: $_", "Error")
+            $errorMsg = "Error creating exception flow: $_`n`n"
+            if ($policyJson) {
+                $errorMsg += "JSON sent (first 1000 chars):`n" + $policyJson.Substring(0, [Math]::Min(1000, $policyJson.Length)) + "`n`n"
+            }
+            $errorMsg += "Full error details:`n$($_.Exception.Message)"
+            
+            # Try to get response body from HttpResponseMessage
+            if ($_.Exception.Response) {
+                try {
+                    $response = $_.Exception.Response
+                    # Check if it's HttpResponseMessage (from Invoke-MgGraphRequest)
+                    if ($response -is [System.Net.Http.HttpResponseMessage]) {
+                        $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                        if ($responseBody) {
+                            $errorMsg += "`n`nResponse: $responseBody"
+                        }
+                    }
+                    # Check if it's HttpWebResponse (legacy)
+                    elseif ($response -is [System.Net.HttpWebResponse]) {
+                        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+                        $responseBody = $reader.ReadToEnd()
+                        $reader.Close()
+                        if ($responseBody) {
+                            $errorMsg += "`n`nResponse: $responseBody"
+                        }
+                    }
+                } catch {
+                    # If we can't read the response, just include what we have
+                    $errorMsg += "`n`n(Unable to read response body: $($_.Exception.Message))"
+                }
+            }
+            
+            Write-Host $errorMsg -ForegroundColor Red
+            [System.Windows.Forms.MessageBox]::Show($errorMsg, "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
         }
     })
 
@@ -2262,10 +2693,39 @@ function Show-ManageUserExceptionsDialog {
     $addTextBox.Size = New-Object System.Drawing.Size(450, 100)
     $form.Controls.Add($addTextBox)
 
+    $searchButton = New-Object System.Windows.Forms.Button
+    $searchButton.Text = "Search Users"
+    $searchButton.Location = New-Object System.Drawing.Point(470, 235)
+    $searchButton.Size = New-Object System.Drawing.Size(100, 30)
+    $searchButton.BackColor = [System.Drawing.Color]::LightBlue
+    $searchButton.Add_Click({
+        $foundUsers = Show-UserSearchDialog -Title "Search Users to Add"
+        if ($foundUsers -and $foundUsers.Count -gt 0) {
+            $existingText = $addTextBox.Text.Trim()
+            $newLines = @()
+            if ($existingText) {
+                $newLines += $existingText.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            }
+            foreach ($user in $foundUsers) {
+                # Add userPrincipalName if available, otherwise display name
+                $userIdentifier = $user.UserPrincipalName
+                if ([string]::IsNullOrWhiteSpace($userIdentifier)) {
+                    $userIdentifier = $user.DisplayName
+                }
+                if ($userIdentifier -notin $newLines) {
+                    $newLines += $userIdentifier
+                }
+            }
+            $addTextBox.Text = ($newLines -join "`n")
+        }
+    })
+    $form.Controls.Add($searchButton)
+    
     $addButton = New-Object System.Windows.Forms.Button
     $addButton.Text = "Add Users"
-    $addButton.Location = New-Object System.Drawing.Point(470, 235)
+    $addButton.Location = New-Object System.Drawing.Point(580, 235)
     $addButton.Size = New-Object System.Drawing.Size(100, 30)
+    $addButton.BackColor = [System.Drawing.Color]::LightGreen
     $addButton.Add_Click({
         $userInputs = $addTextBox.Text.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
         if ($userInputs.Count -eq 0) {
@@ -2319,6 +2779,8 @@ function Show-ManageUserExceptionsDialog {
     $removeButton.Text = "Remove Selected"
     $removeButton.Location = New-Object System.Drawing.Point(470, 275)
     $removeButton.Size = New-Object System.Drawing.Size(100, 30)
+    $removeButton.BackColor = [System.Drawing.Color]::LightCoral
+    $removeButton.ForeColor = [System.Drawing.Color]::DarkRed
     $removeButton.Add_Click({
         if ($excludedListBox.SelectedItems.Count -eq 0) {
             [System.Windows.Forms.MessageBox]::Show("Please select users to remove.", "No Selection")
@@ -2365,6 +2827,7 @@ function Show-ManageUserExceptionsDialog {
     $closeButton.Text = "Close"
     $closeButton.Location = New-Object System.Drawing.Point(580, 350)
     $closeButton.Size = New-Object System.Drawing.Size(75, 23)
+    $closeButton.BackColor = [System.Drawing.Color]::LightGray
     $closeButton.Add_Click({ $form.Close() })
     $form.Controls.Add($closeButton)
 
@@ -2385,6 +2848,262 @@ function Show-ManageUserExceptionsDialog {
     Refresh-ExcludedUsers
     $form.ShowDialog() | Out-Null
     Refresh-PoliciesList $listView
+}
+
+function Show-UserSearchDialog {
+    param(
+        [string]$Title = "Search and Select Users"
+    )
+    
+    if (-not $global:isConnected) {
+        [System.Windows.Forms.MessageBox]::Show("Please connect to Microsoft Graph first.", "Not Connected")
+        return @()
+    }
+    
+    $selectedUsers = @()
+    
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $Title
+    $form.Size = New-Object System.Drawing.Size(750, 600)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    
+    # Search label and box
+    $searchLabel = New-Object System.Windows.Forms.Label
+    $searchLabel.Text = "Search (name or email):"
+    $searchLabel.Location = New-Object System.Drawing.Point(10, 15)
+    $searchLabel.Size = New-Object System.Drawing.Size(150, 20)
+    $form.Controls.Add($searchLabel)
+    
+    $searchBox = New-Object System.Windows.Forms.TextBox
+    $searchBox.Location = New-Object System.Drawing.Point(170, 13)
+    $searchBox.Size = New-Object System.Drawing.Size(400, 20)
+    $form.Controls.Add($searchBox)
+    
+    $searchButton = New-Object System.Windows.Forms.Button
+    $searchButton.Text = "Search"
+    $searchButton.Location = New-Object System.Drawing.Point(580, 12)
+    $searchButton.Size = New-Object System.Drawing.Size(80, 25)
+    $searchButton.BackColor = [System.Drawing.Color]::LightBlue
+    $form.Controls.Add($searchButton)
+    
+    # Results list
+    $resultsListView = New-Object System.Windows.Forms.ListView
+    $resultsListView.Location = New-Object System.Drawing.Point(10, 45)
+    $resultsListView.Size = New-Object System.Drawing.Size(720, 450)
+    $resultsListView.View = "Details"
+    $resultsListView.FullRowSelect = $true
+    $resultsListView.MultiSelect = $true
+    $resultsListView.GridLines = $true
+    $resultsListView.Columns.Add("Display Name", 250) | Out-Null
+    $resultsListView.Columns.Add("Email (UPN)", 300) | Out-Null
+    $resultsListView.Columns.Add("ID", 150) | Out-Null
+    $form.Controls.Add($resultsListView)
+    
+    # Status label
+    $statusLabel = New-Object System.Windows.Forms.Label
+    $statusLabel.Text = "Enter search terms and click Search or press Enter"
+    $statusLabel.Location = New-Object System.Drawing.Point(10, 505)
+    $statusLabel.Size = New-Object System.Drawing.Size(600, 20)
+    $form.Controls.Add($statusLabel)
+    
+    # Buttons
+    $addButton = New-Object System.Windows.Forms.Button
+    $addButton.Text = "Add Selected"
+    $addButton.Location = New-Object System.Drawing.Point(550, 535)
+    $addButton.Size = New-Object System.Drawing.Size(90, 30)
+    $addButton.BackColor = [System.Drawing.Color]::LightGreen
+    $addButton.Enabled = $false
+    $form.Controls.Add($addButton)
+    
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Location = New-Object System.Drawing.Point(650, 535)
+    $cancelButton.Size = New-Object System.Drawing.Size(90, 30)
+    $cancelButton.BackColor = [System.Drawing.Color]::LightGray
+    $cancelButton.Add_Click({ $form.Close() })
+    $form.Controls.Add($cancelButton)
+    
+    # Search function
+    function Invoke-UserSearch {
+        param([string]$searchTerm)
+        
+        $resultsListView.Items.Clear()
+        $statusLabel.Text = "Searching..."
+        $statusLabel.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
+        
+        try {
+            $users = @()
+            $searchTerm = $searchTerm.Trim()
+            
+            if ([string]::IsNullOrWhiteSpace($searchTerm)) {
+                $statusLabel.Text = "Please enter a search term (at least 2 characters)"
+                return
+            }
+            
+            if ($searchTerm.Length -lt 2) {
+                $statusLabel.Text = "Please enter at least 2 characters to search"
+                return
+            }
+            
+            # Escape single quotes for OData filter
+            $escapedTerm = $searchTerm.Replace("'", "''")
+            
+            # Search by display name (contains is supported for displayName)
+            try {
+                $filter = "contains(displayName,'$escapedTerm')"
+                $nameResults = Get-MgUser -Filter $filter -Top 50 -ErrorAction SilentlyContinue
+                if ($nameResults) {
+                    $users += $nameResults
+                }
+            } catch {
+                Write-Host "Error searching by name: $_" -ForegroundColor Yellow
+            }
+            
+            # Search by userPrincipalName (startswith only - contains not supported)
+            try {
+                $filter = "startswith(userPrincipalName,'$escapedTerm')"
+                $emailResults = Get-MgUser -Filter $filter -Top 50 -ErrorAction SilentlyContinue
+                if ($emailResults) {
+                    foreach ($user in $emailResults) {
+                        if ($user.Id -notin ($users | ForEach-Object { $_.Id })) {
+                            $users += $user
+                        }
+                    }
+                }
+            } catch {
+                Write-Host "Error searching by UPN: $_" -ForegroundColor Yellow
+            }
+            
+            # Search by mail (startswith only - contains not supported)
+            try {
+                $filter = "startswith(mail,'$escapedTerm')"
+                $mailResults = Get-MgUser -Filter $filter -Top 50 -ErrorAction SilentlyContinue
+                if ($mailResults) {
+                    foreach ($user in $mailResults) {
+                        if ($user.Id -notin ($users | ForEach-Object { $_.Id })) {
+                            $users += $user
+                        }
+                    }
+                }
+            } catch {
+                Write-Host "Error searching by mail: $_" -ForegroundColor Yellow
+            }
+            
+            # Also try using Search parameter for better partial matching (if available)
+            # This uses Microsoft Graph's search capabilities
+            try {
+                $searchUri = "https://graph.microsoft.com/v1.0/users?`$search=`"$escapedTerm`"&`$top=50"
+                $searchResults = Invoke-MgGraphRequest -Method GET -Uri $searchUri -ErrorAction SilentlyContinue
+                if ($searchResults -and $searchResults.value) {
+                    foreach ($user in $searchResults.value) {
+                        if ($user.id -notin ($users | ForEach-Object { $_.Id })) {
+                            # Convert to MgUser object format
+                            $mgUser = Get-MgUser -UserId $user.id -ErrorAction SilentlyContinue
+                            if ($mgUser) {
+                                $users += $mgUser
+                            }
+                        }
+                    }
+                }
+            } catch {
+                # Search parameter might not be available, that's okay
+                Write-Host "Search parameter not available or error: $_" -ForegroundColor Yellow
+            }
+            
+            # Additional fallback: Get users and filter client-side for partial matches
+            # This handles cases where API filters don't support contains for email fields
+            if ($users.Count -eq 0) {
+                try {
+                    Write-Host "Performing client-side search for better partial matching..." -ForegroundColor Yellow
+                    $statusLabel.Text = "Searching (this may take a moment)..."
+                    $statusLabel.Refresh()
+                    [System.Windows.Forms.Application]::DoEvents()
+                    
+                    # Get users in batches for better performance
+                    $allUsers = Get-MgUser -All -Top 1000 -ErrorAction SilentlyContinue
+                    $searchLower = $searchTerm.ToLower()
+                    $foundCount = 0
+                    
+                    foreach ($user in $allUsers) {
+                        $match = $false
+                        if ($user.DisplayName -and $user.DisplayName.ToLower().Contains($searchLower)) {
+                            $match = $true
+                        }
+                        if ($user.UserPrincipalName -and $user.UserPrincipalName.ToLower().Contains($searchLower)) {
+                            $match = $true
+                        }
+                        if ($user.Mail -and $user.Mail.ToLower().Contains($searchLower)) {
+                            $match = $true
+                        }
+                        if ($match) {
+                            $users += $user
+                            $foundCount++
+                            # Limit results for performance
+                            if ($foundCount -ge 100) { break }
+                        }
+                    }
+                    Write-Host "Client-side search found $foundCount user(s)" -ForegroundColor Green
+                } catch {
+                    Write-Host "Error in client-side search: $_" -ForegroundColor Yellow
+                }
+            }
+            
+            # Remove duplicates and limit results
+            $uniqueUsers = $users | Sort-Object DisplayName -Unique | Select-Object -First 100
+            
+            foreach ($user in $uniqueUsers) {
+                $item = New-Object System.Windows.Forms.ListViewItem($user.DisplayName)
+                $item.SubItems.Add($user.UserPrincipalName) | Out-Null
+                $item.SubItems.Add($user.Id) | Out-Null
+                $item.Tag = $user
+                $resultsListView.Items.Add($item) | Out-Null
+            }
+            
+            if ($uniqueUsers.Count -eq 0) {
+                $statusLabel.Text = "No users found. Try a different search term."
+            } else {
+                $statusLabel.Text = "Found $($uniqueUsers.Count) user(s). Select users and click 'Add Selected'."
+            }
+            
+        } catch {
+            $statusLabel.Text = "Error searching: $($_.Exception.Message)"
+            Write-Host "Error in user search: $_" -ForegroundColor Red
+        }
+    }
+    
+    # Search button click
+    $searchButton.Add_Click({
+        Invoke-UserSearch -searchTerm $searchBox.Text
+    })
+    
+    # Search on Enter key
+    $searchBox.Add_KeyDown({
+        if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+            Invoke-UserSearch -searchTerm $searchBox.Text
+            $_.SuppressKeyPress = $true
+        }
+    })
+    
+    # Enable/disable Add button based on selection
+    $resultsListView.Add_SelectedIndexChanged({
+        $addButton.Enabled = $resultsListView.SelectedItems.Count -gt 0
+    })
+    
+    # Add selected button
+    $addButton.Add_Click({
+        $selectedUsers = @()
+        foreach ($item in $resultsListView.SelectedItems) {
+            $selectedUsers += $item.Tag
+        }
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $form.Close()
+    })
+    
+    $form.ShowDialog() | Out-Null
+    return $selectedUsers
 }
 
 function Show-ManageIncludedUsersDialog {
@@ -2455,10 +3174,39 @@ function Show-ManageIncludedUsersDialog {
     $addTextBox.Size = New-Object System.Drawing.Size(450, 100)
     $form.Controls.Add($addTextBox)
 
+    $searchButton = New-Object System.Windows.Forms.Button
+    $searchButton.Text = "Search Users"
+    $searchButton.Location = New-Object System.Drawing.Point(470, 265)
+    $searchButton.Size = New-Object System.Drawing.Size(100, 30)
+    $searchButton.BackColor = [System.Drawing.Color]::LightBlue
+    $searchButton.Add_Click({
+        $foundUsers = Show-UserSearchDialog -Title "Search Users to Add"
+        if ($foundUsers -and $foundUsers.Count -gt 0) {
+            $existingText = $addTextBox.Text.Trim()
+            $newLines = @()
+            if ($existingText) {
+                $newLines += $existingText.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            }
+            foreach ($user in $foundUsers) {
+                # Add userPrincipalName if available, otherwise display name
+                $userIdentifier = $user.UserPrincipalName
+                if ([string]::IsNullOrWhiteSpace($userIdentifier)) {
+                    $userIdentifier = $user.DisplayName
+                }
+                if ($userIdentifier -notin $newLines) {
+                    $newLines += $userIdentifier
+                }
+            }
+            $addTextBox.Text = ($newLines -join "`n")
+        }
+    })
+    $form.Controls.Add($searchButton)
+    
     $addButton = New-Object System.Windows.Forms.Button
     $addButton.Text = "Add Users"
-    $addButton.Location = New-Object System.Drawing.Point(470, 265)
+    $addButton.Location = New-Object System.Drawing.Point(580, 265)
     $addButton.Size = New-Object System.Drawing.Size(100, 30)
+    $addButton.BackColor = [System.Drawing.Color]::LightGreen
     $addButton.Add_Click({
         $userInputs = $addTextBox.Text.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
         if ($userInputs.Count -eq 0) {
@@ -2515,6 +3263,8 @@ function Show-ManageIncludedUsersDialog {
     $removeButton.Text = "Remove Selected"
     $removeButton.Location = New-Object System.Drawing.Point(470, 305)
     $removeButton.Size = New-Object System.Drawing.Size(100, 30)
+    $removeButton.BackColor = [System.Drawing.Color]::LightCoral
+    $removeButton.ForeColor = [System.Drawing.Color]::DarkRed
     $removeButton.Add_Click({
         if ($includedListBox.SelectedItems.Count -eq 0) {
             [System.Windows.Forms.MessageBox]::Show("Please select users to remove.", "No Selection")
@@ -2541,17 +3291,43 @@ function Show-ManageIncludedUsersDialog {
                     }
                 }
                 
+                # Check if policy has groups or roles that can satisfy the requirement
+                $hasGroups = $currentPolicy.Conditions.Users.IncludeGroups -and $currentPolicy.Conditions.Users.IncludeGroups.Count -gt 0
+                $hasRoles = $currentPolicy.Conditions.Users.IncludeRoles -and $currentPolicy.Conditions.Users.IncludeRoles.Count -gt 0
+                
                 # If no users left, we need at least something or the policy will be invalid
                 if ($newIncludeList.Count -eq 0) {
-                    $confirmEmpty = [System.Windows.Forms.MessageBox]::Show("This will remove all specific users. The policy may become invalid without any included users or groups. Continue?", "Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-                    if ($confirmEmpty -eq [System.Windows.Forms.DialogResult]::No) {
-                        return
+                    if ($hasGroups -or $hasRoles) {
+                        # Policy has groups or roles, so it's OK to have no users
+                        Write-Host "Removing all users, but policy has groups/roles so it remains valid." -ForegroundColor Yellow
+                    } else {
+                        # No groups or roles - must have at least "All" users
+                        $confirmEmpty = [System.Windows.Forms.MessageBox]::Show("This will remove all specific users.`n`nThe policy requires at least one of:`n- Included Users`n- Included Groups`n- Included Roles`n`nSince there are no groups or roles, this will default to 'All Users'. Continue?", "Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                        if ($confirmEmpty -eq [System.Windows.Forms.DialogResult]::No) {
+                            return
+                        }
+                        # Default to "All" when no users, groups, or roles remain
+                        $newIncludeList = @("All")
                     }
                 }
                 
                 $userConditions = @{
                     IncludeUsers = $newIncludeList
                     ExcludeUsers = $currentPolicy.Conditions.Users.ExcludeUsers
+                }
+                
+                # Preserve groups and roles if they exist
+                if ($hasGroups) {
+                    $userConditions.IncludeGroups = $currentPolicy.Conditions.Users.IncludeGroups
+                }
+                if ($hasRoles) {
+                    $userConditions.IncludeRoles = $currentPolicy.Conditions.Users.IncludeRoles
+                }
+                if ($currentPolicy.Conditions.Users.ExcludeGroups) {
+                    $userConditions.ExcludeGroups = $currentPolicy.Conditions.Users.ExcludeGroups
+                }
+                if ($currentPolicy.Conditions.Users.ExcludeRoles) {
+                    $userConditions.ExcludeRoles = $currentPolicy.Conditions.Users.ExcludeRoles
                 }
                 
                 Update-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Conditions @{ Users = $userConditions }
@@ -2606,6 +3382,7 @@ function Show-ManageIncludedUsersDialog {
     $closeButton.Text = "Close"
     $closeButton.Location = New-Object System.Drawing.Point(580, 430)
     $closeButton.Size = New-Object System.Drawing.Size(75, 23)
+    $closeButton.BackColor = [System.Drawing.Color]::LightGray
     $closeButton.Add_Click({ $form.Close() })
     $form.Controls.Add($closeButton)
 
@@ -2721,9 +3498,9 @@ function Create-MainForm {
     $script:namedLocationsListView.FullRowSelect = $true
     $script:namedLocationsListView.GridLines = $true
     $script:namedLocationsListView.Columns.Add("Display Name", 200) | Out-Null
-    $script:namedLocationsListView.Columns.Add("ID", 250) | Out-Null
     $script:namedLocationsListView.Columns.Add("Type", 100) | Out-Null
-    $script:namedLocationsListView.Columns.Add("Details", 370) | Out-Null
+    $script:namedLocationsListView.Columns.Add("Details", 300) | Out-Null
+    $script:namedLocationsListView.Columns.Add("Referenced Policies", 400) | Out-Null
     $namedLocationsTab.Controls.Add($script:namedLocationsListView)
 
     # Named Locations Buttons
@@ -2731,6 +3508,7 @@ function Create-MainForm {
     $nlRefreshButton.Text = "Refresh"
     $nlRefreshButton.Location = New-Object System.Drawing.Point(10, 15)
     $nlRefreshButton.Size = New-Object System.Drawing.Size(80, 25)
+    $nlRefreshButton.BackColor = [System.Drawing.Color]::LightBlue
     $nlRefreshButton.Add_Click({
         Refresh-NamedLocationsList $script:namedLocationsListView
     })
@@ -2740,6 +3518,7 @@ function Create-MainForm {
     $nlCreateButton.Text = "Create Country Location"
     $nlCreateButton.Location = New-Object System.Drawing.Point(100, 15)
     $nlCreateButton.Size = New-Object System.Drawing.Size(150, 25)
+    $nlCreateButton.BackColor = [System.Drawing.Color]::LightGreen
     $nlCreateButton.Add_Click({
         Show-CreateCountryLocationDialog $script:namedLocationsListView
     })
@@ -2749,6 +3528,7 @@ function Create-MainForm {
     $nlEditButton.Text = "Edit Countries"
     $nlEditButton.Location = New-Object System.Drawing.Point(260, 15)
     $nlEditButton.Size = New-Object System.Drawing.Size(100, 25)
+    $nlEditButton.BackColor = [System.Drawing.Color]::Orange
     $nlEditButton.Add_Click({
         Edit-SelectedNamedLocation $script:namedLocationsListView
     })
@@ -2758,6 +3538,7 @@ function Create-MainForm {
     $nlCopyButton.Text = "Copy Countries"
     $nlCopyButton.Location = New-Object System.Drawing.Point(370, 15)
     $nlCopyButton.Size = New-Object System.Drawing.Size(100, 25)
+    $nlCopyButton.BackColor = [System.Drawing.Color]::LightSteelBlue
     $nlCopyButton.Add_Click({
         Copy-SelectedNamedLocation $script:namedLocationsListView
     })
@@ -2767,6 +3548,8 @@ function Create-MainForm {
     $nlRenameButton.Text = "Rename"
     $nlRenameButton.Location = New-Object System.Drawing.Point(480, 15)
     $nlRenameButton.Size = New-Object System.Drawing.Size(80, 25)
+    $nlRenameButton.BackColor = [System.Drawing.Color]::DarkOrange
+    $nlRenameButton.ForeColor = [System.Drawing.Color]::White
     $nlRenameButton.Add_Click({
         Rename-SelectedNamedLocation $script:namedLocationsListView
     })
@@ -2776,6 +3559,8 @@ function Create-MainForm {
     $nlDeleteButton.Text = "Delete"
     $nlDeleteButton.Location = New-Object System.Drawing.Point(570, 15)
     $nlDeleteButton.Size = New-Object System.Drawing.Size(80, 25)
+    $nlDeleteButton.BackColor = [System.Drawing.Color]::LightCoral
+    $nlDeleteButton.ForeColor = [System.Drawing.Color]::DarkRed
     $nlDeleteButton.Add_Click({
         Remove-SelectedNamedLocation $script:namedLocationsListView
     })
@@ -2795,8 +3580,9 @@ function Create-MainForm {
     $script:policiesListView.GridLines = $true
     $script:policiesListView.Columns.Add("Display Name", 200) | Out-Null
     $script:policiesListView.Columns.Add("State", 100) | Out-Null
-    $script:policiesListView.Columns.Add("Included Users", 300) | Out-Null
-    $script:policiesListView.Columns.Add("Excluded Users", 320) | Out-Null
+    $script:policiesListView.Columns.Add("Included Users", 250) | Out-Null
+    $script:policiesListView.Columns.Add("Excluded Users", 250) | Out-Null
+    $script:policiesListView.Columns.Add("Referenced Locations", 300) | Out-Null
     $policiesTab.Controls.Add($script:policiesListView)
 
     # Policies Buttons
@@ -2804,6 +3590,7 @@ function Create-MainForm {
     $polRefreshButton.Text = "Refresh"
     $polRefreshButton.Location = New-Object System.Drawing.Point(10, 15)
     $polRefreshButton.Size = New-Object System.Drawing.Size(80, 25)
+    $polRefreshButton.BackColor = [System.Drawing.Color]::LightBlue
     $polRefreshButton.Add_Click({
         Refresh-PoliciesList $script:policiesListView
     })
@@ -2813,6 +3600,7 @@ function Create-MainForm {
     $polManageIncludedButton.Text = "Manage Included Users"
     $polManageIncludedButton.Location = New-Object System.Drawing.Point(100, 15)
     $polManageIncludedButton.Size = New-Object System.Drawing.Size(140, 25)
+    $polManageIncludedButton.BackColor = [System.Drawing.Color]::LightSteelBlue
     $polManageIncludedButton.Add_Click({
         Show-ManageIncludedUsersDialog $script:policiesListView
     })
@@ -2822,6 +3610,7 @@ function Create-MainForm {
     $polManageUsersButton.Text = "Manage User Exceptions"
     $polManageUsersButton.Location = New-Object System.Drawing.Point(250, 15)
     $polManageUsersButton.Size = New-Object System.Drawing.Size(150, 25)
+    $polManageUsersButton.BackColor = [System.Drawing.Color]::LightSteelBlue
     $polManageUsersButton.Add_Click({
         Show-ManageUserExceptionsDialog $script:policiesListView
     })
@@ -2831,6 +3620,8 @@ function Create-MainForm {
     $polRenameButton.Text = "Rename Policy"
     $polRenameButton.Location = New-Object System.Drawing.Point(410, 15)
     $polRenameButton.Size = New-Object System.Drawing.Size(100, 25)
+    $polRenameButton.BackColor = [System.Drawing.Color]::DarkOrange
+    $polRenameButton.ForeColor = [System.Drawing.Color]::White
     $polRenameButton.Add_Click({
         Rename-SelectedPolicy $script:policiesListView
     })
@@ -2840,6 +3631,7 @@ function Create-MainForm {
     $polCopyButton.Text = "Copy Policy"
     $polCopyButton.Location = New-Object System.Drawing.Point(520, 15)
     $polCopyButton.Size = New-Object System.Drawing.Size(100, 25)
+    $polCopyButton.BackColor = [System.Drawing.Color]::LightSteelBlue
     $polCopyButton.Add_Click({
         Copy-SelectedPolicy $script:policiesListView
     })
@@ -2849,6 +3641,7 @@ function Create-MainForm {
     $polExceptionButton.Text = "Geo-IP Exception"
     $polExceptionButton.Location = New-Object System.Drawing.Point(630, 15)
     $polExceptionButton.Size = New-Object System.Drawing.Size(120, 25)
+    $polExceptionButton.BackColor = [System.Drawing.Color]::LightGreen
     $polExceptionButton.Add_Click({
         Create-GeoIpExceptionForPolicy $script:policiesListView
     })
@@ -2858,6 +3651,7 @@ function Create-MainForm {
     $polDeleteButton.Text = "Delete Policy"
     $polDeleteButton.Location = New-Object System.Drawing.Point(760, 15)
     $polDeleteButton.Size = New-Object System.Drawing.Size(100, 25)
+    $polDeleteButton.BackColor = [System.Drawing.Color]::LightCoral
     $polDeleteButton.ForeColor = [System.Drawing.Color]::DarkRed
     $polDeleteButton.Add_Click({
         Remove-SelectedPolicy $script:policiesListView
