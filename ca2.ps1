@@ -61,14 +61,51 @@ try {
     exit
 }
 
-# Check for Microsoft Graph module - simplified approach
+# Check for Microsoft Graph module - EXE-compatible approach
 Write-Host "Checking for Microsoft.Graph module..." -ForegroundColor Cyan
+
+# EXE environments often don't have the user's module path
+# Add common module paths explicitly
+$userModulePath = Join-Path $env:USERPROFILE "Documents\PowerShell\Modules"
+$userModulePath2 = Join-Path $env:USERPROFILE "Documents\WindowsPowerShell\Modules"
+$programModulePath = "C:\Program Files\WindowsPowerShell\Modules"
+$programModulePath2 = "C:\Program Files\PowerShell\Modules"
+
+# Add user module paths to PSModulePath if they exist and aren't already there
+$pathsToAdd = @()
+if (Test-Path $userModulePath) {
+    if ($env:PSModulePath -notlike "*$userModulePath*") {
+        $pathsToAdd += $userModulePath
+    }
+}
+if (Test-Path $userModulePath2) {
+    if ($env:PSModulePath -notlike "*$userModulePath2*") {
+        $pathsToAdd += $userModulePath2
+    }
+}
+if (Test-Path $programModulePath) {
+    if ($env:PSModulePath -notlike "*$programModulePath*") {
+        $pathsToAdd += $programModulePath
+    }
+}
+if (Test-Path $programModulePath2) {
+    if ($env:PSModulePath -notlike "*$programModulePath2*") {
+        $pathsToAdd += $programModulePath2
+    }
+}
+
+if ($pathsToAdd.Count -gt 0) {
+    Write-Host "Adding module paths for EXE compatibility..." -ForegroundColor Cyan
+    $env:PSModulePath = ($pathsToAdd + ($env:PSModulePath -split ';')) -join ';'
+    foreach ($path in $pathsToAdd) {
+        Write-Host "  Added: $path" -ForegroundColor Gray
+    }
+}
 
 $modulesLoaded = $false
 $moduleError = $null
 
-# Simple approach: Just try to import the modules
-# This works better in EXE environments where Get-Module might not find them
+# Try to import the modules
 try {
     # Try to import Microsoft.Graph (this will import all sub-modules)
     Import-Module Microsoft.Graph -ErrorAction Stop
@@ -91,7 +128,7 @@ try {
             Write-Host "  Loaded: $moduleName" -ForegroundColor Green
             $loadedCount++
         } catch {
-            Write-Host "  Failed: $moduleName" -ForegroundColor Yellow
+            Write-Host "  Failed: $moduleName - $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
     
