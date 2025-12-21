@@ -2,8 +2,7 @@
 .SYNOPSIS
     A GUI-based PowerShell script to manage Microsoft Entra Conditional Access policies.
 .NOTES
-    Author: Gemini  
-    Version: 3.4 (Clean working version with all features)
+    Version: 3.5 (Added Reset Auth, connection state tracking, help dialog, and tooltips)
     Requirements: Windows PowerShell 5.1 with Microsoft.Graph module
 #>
 
@@ -65,14 +64,15 @@ $programModulePath = "C:\Program Files\WindowsPowerShell\Modules"
 $programModulePath2 = "C:\Program Files\PowerShell\Modules"
 
 # Add user module paths to PSModulePath if they exist and aren't already there
+# Filter out OneDrive paths to avoid issues
 $pathsToAdd = @()
 if (Test-Path $userModulePath) {
-    if ($env:PSModulePath -notlike "*$userModulePath*") {
+    if ($userModulePath -notlike "*OneDrive*" -and $env:PSModulePath -notlike "*$userModulePath*") {
         $pathsToAdd += $userModulePath
     }
 }
 if (Test-Path $userModulePath2) {
-    if ($env:PSModulePath -notlike "*$userModulePath2*") {
+    if ($userModulePath2 -notlike "*OneDrive*" -and $env:PSModulePath -notlike "*$userModulePath2*") {
         $pathsToAdd += $userModulePath2
     }
 }
@@ -87,8 +87,12 @@ if (Test-Path $programModulePath2) {
     }
 }
 
+# Filter out OneDrive paths from existing PSModulePath and combine with new paths
+$cleanExistingPaths = ($env:PSModulePath -split ';' | Where-Object { $_ -and $_ -notlike "*OneDrive*" })
 if ($pathsToAdd.Count -gt 0) {
-    $env:PSModulePath = ($pathsToAdd + ($env:PSModulePath -split ';')) -join ';'
+    $env:PSModulePath = ($pathsToAdd + $cleanExistingPaths) -join ';'
+} else {
+    $env:PSModulePath = $cleanExistingPaths -join ';'
 }
 
 $modulesLoaded = $false
@@ -97,6 +101,7 @@ $moduleError = $null
 # Import only the specific sub-modules we need (not the full Microsoft.Graph)
 # This avoids hitting PowerShell's function limit (~4096 functions)
 $requiredModules = @(
+    "Microsoft.Graph.Authentication",  # Required for Connect-MgGraph and Get-MgContext
     "Microsoft.Graph.Identity.SignIns",
     "Microsoft.Graph.Users"
 )
@@ -105,8 +110,16 @@ $failedModules = @()
 
 foreach ($moduleName in $requiredModules) {
     try {
-        Import-Module $moduleName -ErrorAction Stop
-        $loadedCount++
+        # Check if module is already loaded
+        $moduleAlreadyLoaded = Get-Module -Name $moduleName -ErrorAction SilentlyContinue
+        if ($moduleAlreadyLoaded) {
+            # Module already loaded, just verify cmdlets are available
+            $loadedCount++
+        } else {
+            # Import module with -SkipEditionCheck to bypass PackageManagement format file issues
+            Import-Module $moduleName -SkipEditionCheck -ErrorAction Stop
+            $loadedCount++
+        }
     } catch {
         $failedModules += $moduleName
     }
@@ -133,11 +146,13 @@ if ($modulesLoaded) {
     }
     
     if ($missingCmdlets.Count -gt 0) {
-        # Show warning but continue
+        # Required cmdlets are missing - modules not properly loaded
         $modulesLoaded = $false
     }
-} else {
-    # Modules couldn't be loaded - show installation instructions in MessageBox
+}
+
+# Show error dialog and exit if modules couldn't be loaded
+if (-not $modulesLoaded) {
     $errorMsg = "Microsoft.Graph module could not be loaded.`n`n"
     $errorMsg += "Please install it by running the following command in PowerShell:`n`n"
     $errorMsg += "  Install-Module Microsoft.Graph -Scope CurrentUser`n`n"
@@ -220,16 +235,61 @@ function Show-InputBox {
 $global:isConnected = $false
 $global:tenantId = ""
 $global:tenantDisplayName = ""
+$script:isConnecting = $false
 $script:statusLabel = $null
 $script:namedLocationsListView = $null
 $script:policiesListView = $null
 $script:connectButton = $null
 $script:disconnectButton = $null
 $script:reconnectButton = $null
+$script:resetAuthButton = $null
 
 # Microsoft Graph Functions
+function Reset-Authentication {
+    # Forcefully clear any stuck authentication sessions
+    try {
+        # Try to disconnect gracefully first
+        Disconnect-MgGraph -ErrorAction SilentlyContinue
+    } catch {
+        # Ignore errors - we're trying to clear stuck state
+    }
+    
+    # Clear connection state
+    $global:isConnected = $false
+    $global:tenantId = ""
+    $global:tenantDisplayName = ""
+    $script:isConnecting = $false
+    
+    # Clear the list views
+    if ($script:namedLocationsListView) {
+        $script:namedLocationsListView.Items.Clear()
+    }
+    if ($script:policiesListView) {
+        $script:policiesListView.Items.Clear()
+    }
+    
+    Update-ConnectionUI
+    [System.Windows.Forms.MessageBox]::Show("Authentication state has been reset. You can now attempt to connect again.", "Auth Reset", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+}
+
 function Connect-GraphAPI {
     param([string]$TenantId)
+    
+    # Prevent multiple simultaneous connection attempts
+    if ($script:isConnecting) {
+        [System.Windows.Forms.MessageBox]::Show("A connection attempt is already in progress. Please wait or use 'Reset Auth' if it appears stuck.", "Connection In Progress", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return $false
+    }
+    
+    # Clear any stuck authentication state before attempting connection
+    try {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue
+    } catch {
+        # Ignore errors - we're just clearing potential stuck state
+    }
+    
+    $script:isConnecting = $true
+    Update-ConnectionUI
     
     $requiredScopes = @(
         "Policy.Read.All",
@@ -240,13 +300,19 @@ function Connect-GraphAPI {
     )
 
     try {
+        # Attempt connection with error handling
         if ($TenantId) {
-            Connect-MgGraph -Scopes $requiredScopes -TenantId $TenantId
+            Connect-MgGraph -Scopes $requiredScopes -TenantId $TenantId -ErrorAction Stop
         } else {
-            Connect-MgGraph -Scopes $requiredScopes
+            Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
         }
         
-        $token = Get-MgContext
+        # Verify connection was successful
+        $token = Get-MgContext -ErrorAction Stop
+        if (-not $token) {
+            throw "Connection completed but no context was returned"
+        }
+        
         $global:isConnected = $true
         $global:tenantId = $token.TenantId
         $global:tenantDisplayName = $global:tenantId  # Default fallback
@@ -264,10 +330,21 @@ function Connect-GraphAPI {
             Write-Host ("Error getting tenant name: " + $_.Exception.Message) -ForegroundColor Yellow
         }
         
+        $script:isConnecting = $false
         Update-ConnectionUI
         return $true
     } catch {
-        [System.Windows.Forms.MessageBox]::Show("Failed to connect: $_", "Connection Error")
+        $script:isConnecting = $false
+        Update-ConnectionUI
+        
+        $errorMsg = $_.Exception.Message
+        if ($errorMsg -like "*canceled*" -or $errorMsg -like "*cancelled*" -or $errorMsg -like "*user*denied*") {
+            [System.Windows.Forms.MessageBox]::Show("Connection was canceled or denied. If authentication appears stuck, use the 'Reset Auth' button to clear the session.", "Connection Canceled", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        } elseif ($errorMsg -like "*timeout*" -or $errorMsg -like "*timed out*") {
+            [System.Windows.Forms.MessageBox]::Show("Connection timed out. This may indicate a network issue or the authentication dialog didn't appear. Use the 'Reset Auth' button to clear the session and try again.", "Connection Timeout", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("Failed to connect: $errorMsg`n`nIf authentication appears stuck, use the 'Reset Auth' button to clear the session.", "Connection Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        }
         return $false
     }
 }
@@ -336,7 +413,14 @@ function Show-ReconnectDialog {
     $connectButton.Text = "Connect"
     $connectButton.Location = New-Object System.Drawing.Point(210, 120)
     $connectButton.Size = New-Object System.Drawing.Size(75, 23)
+    $connectButton.BackColor = [System.Drawing.Color]::LightGreen
     $connectButton.Add_Click({
+        # Prevent multiple connection attempts
+        if ($script:isConnecting) {
+            [System.Windows.Forms.MessageBox]::Show("A connection attempt is already in progress. Please wait or use 'Reset Auth' if it appears stuck.", "Connection In Progress", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+        
         # Disconnect first if already connected
         if ($global:isConnected) {
             Disconnect-GraphAPI
@@ -371,7 +455,10 @@ function Show-ReconnectDialog {
 
 function Update-ConnectionUI {
     if ($script:statusLabel) {
-        if ($global:isConnected) {
+        if ($script:isConnecting) {
+            $script:statusLabel.Text = "Connecting..."
+            $script:statusLabel.ForeColor = [System.Drawing.Color]::Orange
+        } elseif ($global:isConnected) {
             if ($global:tenantDisplayName -and $global:tenantDisplayName -ne $global:tenantId) {
                 $script:statusLabel.Text = "Connected to: " + $global:tenantDisplayName
             } else {
@@ -385,15 +472,19 @@ function Update-ConnectionUI {
     }
     
     if ($script:connectButton) {
-        $script:connectButton.Enabled = -not $global:isConnected
+        $script:connectButton.Enabled = -not $global:isConnected -and -not $script:isConnecting
     }
     
     if ($script:disconnectButton) {
-        $script:disconnectButton.Enabled = $global:isConnected
+        $script:disconnectButton.Enabled = $global:isConnected -and -not $script:isConnecting
     }
     
     if ($script:reconnectButton) {
-        $script:reconnectButton.Enabled = $true  # Always enabled
+        $script:reconnectButton.Enabled = -not $script:isConnecting
+    }
+    
+    if ($script:resetAuthButton) {
+        $script:resetAuthButton.Enabled = $true  # Always enabled - useful when stuck
     }
 }
 
@@ -3502,6 +3593,268 @@ function Show-ManageIncludedUsersDialog {
     Refresh-PoliciesList $listView
 }
 
+function Show-HelpDialog {
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Help - Conditional Access Manager"
+    $form.Size = New-Object System.Drawing.Size(750, 650)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    
+    # Rich text box for help content
+    $helpTextBox = New-Object System.Windows.Forms.RichTextBox
+    $helpTextBox.Location = New-Object System.Drawing.Point(10, 10)
+    $helpTextBox.Size = New-Object System.Drawing.Size(720, 570)
+    $helpTextBox.ReadOnly = $true
+    $helpTextBox.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $helpTextBox.BackColor = [System.Drawing.Color]::White
+    $helpTextBox.Multiline = $true
+    $helpTextBox.WordWrap = $true
+    $helpTextBox.ScrollBars = "Vertical"
+    
+    $helpContent = @"
+CONDITIONAL ACCESS MANAGER - HELP GUIDE
+
+═══════════════════════════════════════════════════════════════
+QUICK START
+═══════════════════════════════════════════════════════════════
+
+1. Click "Connect to Microsoft Graph" to authenticate
+2. Select a tab: "Named Locations" or "Conditional Access Policies"
+3. Use the color-coded buttons to perform actions
+4. Refresh lists after making changes
+
+═══════════════════════════════════════════════════════════════
+CONNECTION MANAGEMENT
+═══════════════════════════════════════════════════════════════
+
+• Connect: Authenticate with Microsoft Graph (browser popup)
+• Reconnect/Change Tenant: Switch to a different tenant
+• Disconnect: End current session
+• Reset Auth: Clear stuck authentication sessions if connection hangs
+• Status shows "Connecting..." during authentication, then connection status
+
+═══════════════════════════════════════════════════════════════
+NAMED LOCATIONS TAB
+═══════════════════════════════════════════════════════════════
+
+CREATE COUNTRY LOCATION (Green button)
+  - Click "Create Country Location"
+  - Enter a display name
+  - Select countries from the picker
+  - Optionally include unknown/future countries
+
+EDIT COUNTRIES (Orange button)
+  - Select a location from the list
+  - Modify countries or settings
+  - Save changes
+
+COPY COUNTRIES (Light Blue button)
+  - Select a location to duplicate
+  - Enter new name
+  - Creates exact copy with all settings
+
+RENAME (Orange button)
+  - Select a location
+  - Enter new display name
+
+DELETE (Red button)
+  - Select one or more locations
+  - Cannot delete if referenced by policies
+  - Shows summary of deleted/skipped items
+
+REFERENCE TRACKING
+  - "Referenced Policies" column shows which policies use each location
+  - Prevents accidental deletion of in-use locations
+
+═══════════════════════════════════════════════════════════════
+CONDITIONAL ACCESS POLICIES TAB
+═══════════════════════════════════════════════════════════════
+
+MANAGE INCLUDED USERS (Light Blue button)
+  - Add/remove users from policy scope
+  - Use search to find users by name or email
+  - Supports partial matching (e.g., "john" finds "john.doe@domain.com")
+  - Multi-select support for bulk operations
+
+MANAGE USER EXCEPTIONS (Light Blue button)
+  - Add users to exclusion list
+  - Search and select multiple users
+  - Users are excluded from policy enforcement
+
+RENAME (Orange button)
+  - Select a policy
+  - Update display name
+
+COPY POLICY (Light Blue button)
+  - Duplicates policy with all settings
+  - IMPORTANT: Copied policies are created as DISABLED for safety
+  - Enable manually after reviewing settings
+
+DELETE (Red button)
+  - Select one or more policies
+  - Extra confirmation for enabled policies
+  - Shows summary of deleted items
+
+REFERENCE TRACKING
+  - "Referenced Locations" column shows which locations are used
+  - Indicates if locations are included or excluded
+
+═══════════════════════════════════════════════════════════════
+USER SEARCH FEATURES
+═══════════════════════════════════════════════════════════════
+
+• Search by full or partial name (e.g., "john", "smith")
+• Search by full or partial email (e.g., "john@", "@domain.com")
+• Results show display name and email address
+• Select multiple users at once
+• Client-side fallback handles partial matches
+
+═══════════════════════════════════════════════════════════════
+BUTTON COLOR CODING
+═══════════════════════════════════════════════════════════════
+
+🟢 Green: Add/Create actions
+🔴 Red: Delete/Remove actions
+🔵 Blue: Refresh/Search actions
+🟠 Orange: Edit/Rename actions
+🔵 Light Blue: Copy/Manage actions
+⚪ Gray: Cancel/Close actions
+
+═══════════════════════════════════════════════════════════════
+IMPORTANT TIPS
+═══════════════════════════════════════════════════════════════
+
+• Always refresh lists after making changes or switching tenants
+• Copied policies are DISABLED by default - enable manually if needed
+• Cannot delete locations that are referenced by policies
+• Use "Reset Auth" if authentication appears stuck or times out
+• Multi-select works for bulk deletion operations
+• Reference columns help identify dependencies before deletion
+
+═══════════════════════════════════════════════════════════════
+TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════
+
+Connection Issues:
+  - If authentication hangs, click "Reset Auth"
+  - Check network connectivity
+  - Verify Microsoft.Graph module is installed
+  - Ensure you have required permissions
+
+Module Errors:
+  - Install: Install-Module Microsoft.Graph -Scope CurrentUser
+  - Restart application after installation
+  - Check PowerShell execution policy if needed
+
+Search Not Working:
+  - Ensure User.Read.All permission is granted
+  - Try partial searches instead of exact matches
+  - Check user exists in the tenant
+
+═══════════════════════════════════════════════════════════════
+REQUIRED PERMISSIONS
+═══════════════════════════════════════════════════════════════
+
+• Policy.Read.All
+• Policy.ReadWrite.ConditionalAccess
+• User.Read.All
+• Group.Read.All
+• Organization.Read.All
+
+Grant these during the initial authentication flow.
+"@
+    $helpTextBox.Text = $helpContent
+    $form.Controls.Add($helpTextBox)
+
+    $closeButton = New-Object System.Windows.Forms.Button
+    $closeButton.Text = "Close"
+    $closeButton.Location = New-Object System.Drawing.Point(655, 590)
+    $closeButton.Size = New-Object System.Drawing.Size(75, 23)
+    $closeButton.BackColor = [System.Drawing.Color]::LightGray
+    $closeButton.Add_Click({ $form.Close() })
+    $form.Controls.Add($closeButton)
+
+    $form.ShowDialog() | Out-Null
+}
+
+function Show-AboutDialog {
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "About - Conditional Access Manager"
+    $form.Size = New-Object System.Drawing.Size(520, 420)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = "FixedDialog"
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    
+    # Title Label
+    $titleLabel = New-Object System.Windows.Forms.Label
+    $titleLabel.Text = "Conditional Access Manager"
+    $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+    $titleLabel.Location = New-Object System.Drawing.Point(20, 20)
+    $titleLabel.Size = New-Object System.Drawing.Size(470, 30)
+    $titleLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $form.Controls.Add($titleLabel)
+    
+    # Version Label
+    $versionLabel = New-Object System.Windows.Forms.Label
+    $versionLabel.Text = "Version 3.5"
+    $versionLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $versionLabel.Location = New-Object System.Drawing.Point(20, 55)
+    $versionLabel.Size = New-Object System.Drawing.Size(470, 25)
+    $versionLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $form.Controls.Add($versionLabel)
+    
+    # Description Label
+    $descLabel = New-Object System.Windows.Forms.Label
+    $descLabel.Text = "A powerful GUI-based PowerShell tool for managing Microsoft Entra (Azure AD) Conditional Access policies and Named Locations."
+    $descLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $descLabel.Location = New-Object System.Drawing.Point(20, 85)
+    $descLabel.Size = New-Object System.Drawing.Size(470, 45)
+    $descLabel.TextAlign = [System.Drawing.ContentAlignment]::TopCenter
+    $form.Controls.Add($descLabel)
+    
+    # Info Rich Text Box
+    $infoTextBox = New-Object System.Windows.Forms.RichTextBox
+    $infoTextBox.Location = New-Object System.Drawing.Point(20, 135)
+    $infoTextBox.Size = New-Object System.Drawing.Size(470, 200)
+    $infoTextBox.ReadOnly = $true
+    $infoTextBox.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $infoTextBox.BackColor = [System.Drawing.Color]::White
+    $infoTextBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $infoTextBox.Multiline = $true
+    $infoTextBox.WordWrap = $true
+    
+    $infoContent = @"
+Repository: https://github.com/monobrau/ca_manager
+
+License: MIT License
+
+Requirements:
+- Windows PowerShell 5.1+
+- Microsoft.Graph PowerShell module
+- Microsoft Entra admin permissions
+
+Built with:
+- PowerShell Windows Forms
+- Microsoft Graph PowerShell SDK
+- PS2EXE (for executable compilation)
+"@
+    $infoTextBox.Text = $infoContent
+    $form.Controls.Add($infoTextBox)
+    
+    # Close Button
+    $closeButton = New-Object System.Windows.Forms.Button
+    $closeButton.Text = "Close"
+    $closeButton.Location = New-Object System.Drawing.Point(415, 345)
+    $closeButton.Size = New-Object System.Drawing.Size(75, 23)
+    $closeButton.BackColor = [System.Drawing.Color]::LightGray
+    $closeButton.Add_Click({ $form.Close() })
+    $form.Controls.Add($closeButton)
+    
+    $form.ShowDialog() | Out-Null
+}
+
 function Create-MainForm {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Conditional Access Management Tool"
@@ -3545,18 +3898,56 @@ function Create-MainForm {
     $script:disconnectButton.Text = "Disconnect"
     $script:disconnectButton.Location = New-Object System.Drawing.Point(360, 0)
     $script:disconnectButton.Size = New-Object System.Drawing.Size(100, 30)
+    $script:disconnectButton.BackColor = [System.Drawing.Color]::LightCoral
     $script:disconnectButton.Add_Click({
         Disconnect-GraphAPI
     })
     $connectionPanel.Controls.Add($script:disconnectButton)
 
+    # Reset Auth Button
+    $script:resetAuthButton = New-Object System.Windows.Forms.Button
+    $script:resetAuthButton.Text = "Reset Auth"
+    $script:resetAuthButton.Location = New-Object System.Drawing.Point(470, 0)
+    $script:resetAuthButton.Size = New-Object System.Drawing.Size(100, 30)
+    $script:resetAuthButton.BackColor = [System.Drawing.Color]::Orange
+    $script:resetAuthButton.Add_Click({
+        Reset-Authentication
+    })
+    $connectionPanel.Controls.Add($script:resetAuthButton)
+
     # Status Label
     $script:statusLabel = New-Object System.Windows.Forms.Label
     $script:statusLabel.Text = "Not connected"
-    $script:statusLabel.Location = New-Object System.Drawing.Point(470, 5)
-    $script:statusLabel.Size = New-Object System.Drawing.Size(500, 20)
+    $script:statusLabel.Location = New-Object System.Drawing.Point(580, 5)
+    $script:statusLabel.Size = New-Object System.Drawing.Size(200, 20)
     $script:statusLabel.ForeColor = [System.Drawing.Color]::Red
     $connectionPanel.Controls.Add($script:statusLabel)
+
+    # About Button
+    $aboutButton = New-Object System.Windows.Forms.Button
+    $aboutButton.Text = "About"
+    $aboutButton.Location = New-Object System.Drawing.Point(790, 0)
+    $aboutButton.Size = New-Object System.Drawing.Size(80, 30)
+    $aboutButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+    $aboutButton.BackColor = [System.Drawing.Color]::LightGray
+    $aboutButton.Add_Click({
+        Show-AboutDialog
+    })
+    $connectionPanel.Controls.Add($aboutButton)
+    $aboutButton.BringToFront()
+
+    # Help Button
+    $helpButton = New-Object System.Windows.Forms.Button
+    $helpButton.Text = "Help"
+    $helpButton.Location = New-Object System.Drawing.Point(880, 0)
+    $helpButton.Size = New-Object System.Drawing.Size(80, 30)
+    $helpButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+    $helpButton.BackColor = [System.Drawing.Color]::LightGray
+    $helpButton.Add_Click({
+        Show-HelpDialog
+    })
+    $connectionPanel.Controls.Add($helpButton)
+    $helpButton.BringToFront()
 
     # Tab Control
     $tabControl = New-Object System.Windows.Forms.TabControl
@@ -3761,3 +4152,6 @@ try {
     Write-Error "Error: $($_.Exception.Message)"
     Read-Host "Press Enter to exit"
 }
+
+
+

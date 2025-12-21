@@ -299,8 +299,16 @@ The tool provides:
 
 ## 📊 Version History
 
-- **v1.0.0** (Current)
-  - Initial release with executable version
+- **v3.5** (Current)
+  - Added "Reset Auth" button to clear stuck authentication sessions
+  - Connection state tracking with visual "Connecting..." status
+  - In-app help dialog with quick start guide
+  - Tooltips on buttons for better user guidance
+  - Enhanced connection error handling with specific timeout/cancel messages
+  - Prevention of multiple simultaneous connection attempts
+  - Improved UI feedback during authentication process
+
+- **v3.4**
   - User search functionality with partial matching
   - Geo-IP exception creation workflow
   - Reference tracking columns
@@ -330,10 +338,6 @@ We welcome contributions! Please follow these steps:
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 👨‍💻 Author
-
-**Gemini** - *Initial work and development*
 
 ## 🙏 Acknowledgments
 
