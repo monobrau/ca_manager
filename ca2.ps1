@@ -55,6 +55,56 @@ try {
     exit
 }
 
+# Hide console window for EXE (but keep it available for authentication)
+# Detect if running as EXE and hide console window
+try {
+    $isExe = $PSCommandPath -like "*.exe" -or $MyInvocation.MyCommand.Path -like "*.exe"
+    if ($isExe) {
+        # Import Windows API to hide/show console window
+        Add-Type -Name Window -Namespace Console -MemberDefinition '
+        [DllImport("Kernel32.dll")]
+        public static extern IntPtr GetConsoleWindow();
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
+        '
+        
+        # Hide the console window initially
+        $consolePtr = [Console.Window]::GetConsoleWindow()
+        if ($consolePtr -ne [IntPtr]::Zero) {
+            # SW_HIDE = 0
+            [Console.Window]::ShowWindow($consolePtr, 0) | Out-Null
+        }
+    }
+} catch {
+    # Ignore errors - console hiding is optional
+}
+
+# Function to show console window when needed (for authentication)
+function Show-ConsoleWindow {
+    try {
+        $consolePtr = [Console.Window]::GetConsoleWindow()
+        if ($consolePtr -ne [IntPtr]::Zero) {
+            # SW_SHOW = 5, SW_RESTORE = 9
+            [Console.Window]::ShowWindow($consolePtr, 9) | Out-Null
+        }
+    } catch {
+        # Ignore errors
+    }
+}
+
+# Function to hide console window
+function Hide-ConsoleWindow {
+    try {
+        $consolePtr = [Console.Window]::GetConsoleWindow()
+        if ($consolePtr -ne [IntPtr]::Zero) {
+            # SW_HIDE = 0
+            [Console.Window]::ShowWindow($consolePtr, 0) | Out-Null
+        }
+    } catch {
+        # Ignore errors
+    }
+}
+
 # Check for Microsoft Graph module - EXE-compatible approach (silent)
 # EXE environments often don't have the user's module path
 # Add common module paths explicitly
@@ -286,6 +336,7 @@ $script:isConnecting = $false
 $script:statusLabel = $null
 $script:namedLocationsListView = $null
 $script:policiesListView = $null
+$script:mainForm = $null
 $script:connectButton = $null
 $script:disconnectButton = $null
 $script:reconnectButton = $null
@@ -347,11 +398,73 @@ function Connect-GraphAPI {
     )
 
     try {
+        # For EXE versions, ensure the main form is visible and bring it to front
+        # This helps WAM authentication find the parent window handle
+        if ($script:mainForm -and -not $script:mainForm.IsDisposed) {
+            $script:mainForm.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+            $script:mainForm.BringToFront()
+            $script:mainForm.Activate()
+            $script:mainForm.Focus()
+            
+            # Force the form to be visible and on top
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+        
         # Attempt connection with error handling
-        if ($TenantId) {
-            Connect-MgGraph -Scopes $requiredScopes -TenantId $TenantId -ErrorAction Stop
-        } else {
-            Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
+        # Use standard interactive browser authentication (WAM will be used automatically on Windows)
+        # Note: The form must be visible for WAM to work properly in EXE mode
+        # Suppress WAM warnings (they appear as informational messages, not critical)
+        $originalWarningPreference = $WarningPreference
+        $WarningPreference = 'SilentlyContinue'
+        try {
+            if ($TenantId) {
+                Connect-MgGraph -Scopes $requiredScopes -TenantId $TenantId -ErrorAction Stop
+            } else {
+                Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
+            }
+        } catch {
+            # If window handle error occurs, try device code authentication as fallback
+            # This works better when EXE has console window support
+            if ($_.Exception.Message -like "*window handle*" -or $_.Exception.Message -like "*parent window*") {
+                $WarningPreference = 'Continue'  # Show device code output
+                
+                # Show console window for device code display
+                Show-ConsoleWindow
+                
+                $deviceCodeMsg = "Browser authentication failed. Switching to device code authentication.`n`n" +
+                                "A device code will be displayed in the console window.`n`n" +
+                                "Please:`n" +
+                                "1. Look at the console window for the device code`n" +
+                                "2. Go to https://microsoft.com/devicelogin`n" +
+                                "3. Enter the displayed code`n" +
+                                "4. Complete authentication in your browser`n`n" +
+                                "Click OK to continue with device code authentication."
+                [System.Windows.Forms.MessageBox]::Show($deviceCodeMsg, "Device Code Authentication", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                
+                # Ensure form is responsive
+                [System.Windows.Forms.Application]::DoEvents()
+                
+                # Use device code authentication - code will display in console
+                try {
+                    if ($TenantId) {
+                        Connect-MgGraph -Scopes $requiredScopes -TenantId $TenantId -UseDeviceAuthentication -ErrorAction Stop
+                    } else {
+                        Connect-MgGraph -Scopes $requiredScopes -UseDeviceAuthentication -ErrorAction Stop
+                    }
+                    # Hide console window again after successful authentication
+                    Start-Sleep -Seconds 2
+                    Hide-ConsoleWindow
+                } catch {
+                    $WarningPreference = $originalWarningPreference
+                    # Keep console visible if authentication failed
+                    throw
+                }
+            } else {
+                $WarningPreference = $originalWarningPreference
+                throw
+            }
+        } finally {
+            $WarningPreference = $originalWarningPreference
         }
         
         # Verify connection was successful
@@ -363,6 +476,9 @@ function Connect-GraphAPI {
         $global:isConnected = $true
         $global:tenantId = $token.TenantId
         $global:tenantDisplayName = $global:tenantId  # Default fallback
+        
+        # Hide console window after successful connection
+        Hide-ConsoleWindow
         
         # Simple synchronous attempt to get tenant name
         try {
@@ -1017,8 +1133,16 @@ function Show-CountrySelectionDialog {
     }
 
     function Update-SelectionCount {
-        $selectedCount = $countriesListBox.CheckedItems.Count
-        $selectionLabel.Text = "$selectedCount countries selected"
+        # Check if form and controls are still valid before accessing them
+        if ($null -eq $form -or $form.IsDisposed -or $null -eq $countriesListBox -or $null -eq $selectionLabel) {
+            return
+        }
+        try {
+            $selectedCount = $countriesListBox.CheckedItems.Count
+            $selectionLabel.Text = "$selectedCount countries selected"
+        } catch {
+            # Silently ignore errors if controls are disposed
+        }
     }
 
     # Event handlers
@@ -1041,15 +1165,29 @@ function Show-CountrySelectionDialog {
     })
 
     $countriesListBox.Add_ItemCheck({
-        # Use a timer to update count after the check state changes
-        $timer = New-Object System.Windows.Forms.Timer
-        $timer.Interval = 10
-        $timer.Add_Tick({
-            Update-SelectionCount
-            $timer.Stop()
-            $timer.Dispose()
-        })
-        $timer.Start()
+        param($sender, $e)
+        
+        # Update count synchronously by calculating what it will be after the change
+        # ItemCheck fires BEFORE the state changes, so we account for the pending change
+        try {
+            if ($null -ne $countriesListBox -and $null -ne $selectionLabel -and 
+                $null -ne $form -and -not $form.IsDisposed) {
+                $currentCount = $countriesListBox.CheckedItems.Count
+                
+                # Adjust count based on whether item is being checked or unchecked
+                if ($e.NewValue -eq [System.Windows.Forms.CheckState]::Checked) {
+                    # Item is being checked, so count will increase by 1
+                    $newCount = $currentCount + 1
+                } else {
+                    # Item is being unchecked, so count will decrease by 1
+                    $newCount = $currentCount - 1
+                }
+                
+                $selectionLabel.Text = "$newCount countries selected"
+            }
+        } catch {
+            # Silently ignore errors if controls are disposed
+        }
     })
 
     # OK and Cancel buttons
@@ -1141,14 +1279,19 @@ function Show-CountryLocationDialog {
         # Get current countries from textbox
         $currentCountries = @()
         if (-not [string]::IsNullOrWhiteSpace($countriesTextBox.Text)) {
-            $currentCountries = $countriesTextBox.Text.Split(',') | ForEach-Object { $_.Trim().ToUpper() }
+            $currentCountries = $countriesTextBox.Text.Split(',') | 
+                ForEach-Object { $_.Trim().ToUpper() } | 
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
         }
         
         # Open country selection dialog
         $selectedCountries = Show-CountrySelectionDialog -PreselectedCountries $currentCountries
         
-        if ($selectedCountries) {
+        if ($selectedCountries -and $selectedCountries.Count -gt 0) {
             $countriesTextBox.Text = ($selectedCountries -join ', ')
+        } else {
+            # Clear if no countries selected
+            $countriesTextBox.Text = ""
         }
     })
     $form.Controls.Add($selectCountriesButton)
@@ -1186,14 +1329,15 @@ function Show-CountryLocationDialog {
 
     # Buttons
     $actionButton = New-Object System.Windows.Forms.Button
-    $actionButton.Text = $Mode
-    $actionButton.Location = New-Object System.Drawing.Point(310, 215)
-    $actionButton.Size = New-Object System.Drawing.Size(75, 23)
     if ($Mode -eq "Create") {
+        $actionButton.Text = "Create"
         $actionButton.BackColor = [System.Drawing.Color]::LightGreen
     } else {
+        $actionButton.Text = "Apply"
         $actionButton.BackColor = [System.Drawing.Color]::Orange
     }
+    $actionButton.Location = New-Object System.Drawing.Point(310, 215)
+    $actionButton.Size = New-Object System.Drawing.Size(75, 23)
     $actionButton.Add_Click({
         if ([string]::IsNullOrWhiteSpace($nameTextBox.Text)) {
             [System.Windows.Forms.MessageBox]::Show("Please enter a display name.", "Validation Error")
@@ -1205,23 +1349,63 @@ function Show-CountryLocationDialog {
         }
 
         try {
-            $countryCodes = $countriesTextBox.Text.Split(',') | ForEach-Object { $_.Trim().ToUpper() }
+            # Parse and validate country codes
+            $countryCodes = $countriesTextBox.Text.Split(',') | 
+                ForEach-Object { $_.Trim().ToUpper() } | 
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            
+            # Validate we have at least one country code
+            if ($countryCodes.Count -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Please select at least one country.", "Validation Error")
+                return
+            }
+            
+            # Validate country codes are 2-letter ISO codes
+            $invalidCodes = $countryCodes | Where-Object { $_.Length -ne 2 -or -not ($_ -match '^[A-Z]{2}$') }
+            if ($invalidCodes.Count -gt 0) {
+                [System.Windows.Forms.MessageBox]::Show("Invalid country codes detected: $($invalidCodes -join ', ')`n`nCountry codes must be 2-letter ISO codes (e.g., US, CA, GB).", "Validation Error")
+                return
+            }
+            
             $success = $false
             
             if ($Mode -eq "Edit") {
-                # Update existing location using PATCH
-                $updateBody = @{
-                    displayName = $nameTextBox.Text
-                    countriesAndRegions = $countryCodes
-                    includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
-                } | ConvertTo-Json -Depth 10
-                
-                Write-Host ("Updating location " + $ExistingLocation.Id + " with: " + $updateBody) -ForegroundColor Cyan
-                $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
-                $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $updateBody -ContentType "application/json"
-                Write-Host ("Update response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
-                $success = $true
-                [System.Windows.Forms.MessageBox]::Show("Named Location updated successfully!", "Success")
+                # Try using the PowerShell cmdlet first (handles formatting better)
+                try {
+                    $updateParams = @{
+                        NamedLocationId = $ExistingLocation.Id
+                        BodyParameter = @{
+                            "@odata.type" = "#microsoft.graph.countryNamedLocation"
+                            displayName = $nameTextBox.Text
+                            countriesAndRegions = $countryCodes
+                            includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
+                        }
+                    }
+                    
+                    Write-Host ("Updating location " + $ExistingLocation.Id + " with " + $countryCodes.Count + " countries using cmdlet") -ForegroundColor Cyan
+                    Update-MgIdentityConditionalAccessNamedLocation @updateParams -ErrorAction Stop
+                    $success = $true
+                    [System.Windows.Forms.MessageBox]::Show("Named Location updated successfully!", "Success")
+                } catch {
+                    # If cmdlet fails, fall back to REST API
+                    Write-Host ("Cmdlet failed, trying REST API: " + $_.Exception.Message) -ForegroundColor Yellow
+                    
+                    # Update existing location using PATCH REST API
+                    $updateBody = @{
+                        displayName = $nameTextBox.Text
+                        countriesAndRegions = $countryCodes
+                        includeUnknownCountriesAndRegions = $includeUnknownCheckBox.Checked
+                    }
+                    
+                    $jsonBody = $updateBody | ConvertTo-Json -Depth 10
+                    
+                    Write-Host ("Updating via REST API with " + $countryCodes.Count + " countries") -ForegroundColor Cyan
+                    $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/" + $ExistingLocation.Id
+                    $response = Invoke-MgGraphRequest -Method PATCH -Uri $uri -Body $jsonBody -ContentType "application/json" -ErrorAction Stop
+                    Write-Host ("Update response: " + ($response | ConvertTo-Json -Depth 3)) -ForegroundColor Green
+                    $success = $true
+                    [System.Windows.Forms.MessageBox]::Show("Named Location updated successfully!", "Success")
+                }
             } else {
                 # Create new location using REST API
                 $createParams = @{
@@ -1252,18 +1436,61 @@ function Show-CountryLocationDialog {
             $errorMessage += "Error: " + $_.Exception.Message + "`n`n"
             $errorMessage += "Settings:`n"
             $errorMessage += "- Name: " + $nameTextBox.Text + "`n"
-            $errorMessage += "- Countries: " + ($countryCodes -join ', ') + "`n"
+            $errorMessage += "- Countries: " + ($countryCodes.Count) + " countries selected`n"
             $errorMessage += "- Include Unknown: " + $includeUnknownCheckBox.Checked + "`n`n"
+            
+            # Try to get detailed error response from Microsoft Graph
+            $apiErrorDetails = $null
+            if ($_.Exception -is [Microsoft.Graph.PowerShell.Runtime.GraphException]) {
+                try {
+                    $graphError = $_.Exception
+                    if ($graphError.ErrorResponse) {
+                        $apiErrorDetails = $graphError.ErrorResponse | ConvertTo-Json -Depth 5
+                    }
+                } catch {
+                    # Try alternative method to get error details
+                    try {
+                        $apiErrorDetails = $_.Exception.ToString()
+                    } catch {}
+                }
+            } elseif ($_.Exception.Response) {
+                try {
+                    $responseStream = $_.Exception.Response.GetResponseStream()
+                    if ($responseStream) {
+                        $reader = New-Object System.IO.StreamReader($responseStream)
+                        $responseBody = $reader.ReadToEnd()
+                        $reader.Close()
+                        if ($responseBody) {
+                            # Try to parse as JSON for better formatting
+                            try {
+                                $errorObj = $responseBody | ConvertFrom-Json
+                                $apiErrorDetails = $errorObj | ConvertTo-Json -Depth 5
+                            } catch {
+                                $apiErrorDetails = $responseBody
+                            }
+                        }
+                    }
+                } catch {
+                    # Ignore errors reading response
+                }
+            }
+            
+            if ($apiErrorDetails) {
+                $errorMessage += "API Error Details:`n" + $apiErrorDetails + "`n`n"
+            }
             
             if ($_.Exception.Message -like "*BadRequest*") {
                 $errorMessage += "Common fixes:`n"
-                $errorMessage += "* Use valid 2-letter country codes: US, CA, GB, DE, FR`n"
+                $errorMessage += "* Use valid 2-letter ISO country codes: US, CA, GB, DE, FR`n"
                 $errorMessage += "* Remove special characters from display name`n"
-                $errorMessage += "* Ensure you have the required permissions"
+                $errorMessage += "* Ensure country codes are valid ISO 3166-1 alpha-2 codes`n"
+                $errorMessage += "* Check that you have the required permissions`n"
+                $errorMessage += "* If selecting many countries (" + $countryCodes.Count + "), Microsoft Graph may have limits`n"
+                $errorMessage += "* Try selecting fewer countries or splitting into multiple locations"
             }
             
             Write-Host ("ERROR: " + $errorMessage) -ForegroundColor Red
-            [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error Details")
+            [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error Details", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
         }
     })
     $form.Controls.Add($actionButton)
@@ -1441,7 +1668,29 @@ function Rename-SelectedNamedLocation {
             return
         }
         
-        Update-MgIdentityConditionalAccessNamedLocation -NamedLocationId $locationId -DisplayName $newName
+        # Get the odata type from the existing location
+        $odataType = $existingLocation.AdditionalProperties.'@odata.type'
+        if (-not $odataType) {
+            # Fallback: determine type from the location object
+            if ($existingLocation.AdditionalProperties.'countriesAndRegions') {
+                $odataType = "#microsoft.graph.countryNamedLocation"
+            } elseif ($existingLocation.AdditionalProperties.'ipRanges') {
+                $odataType = "#microsoft.graph.ipNamedLocation"
+            } else {
+                $odataType = "#microsoft.graph.namedLocation"
+            }
+        }
+        
+        # Use BodyParameter to include the odata type
+        $updateParams = @{
+            NamedLocationId = $locationId
+            BodyParameter = @{
+                "@odata.type" = $odataType
+                displayName = $newName
+            }
+        }
+        
+        Update-MgIdentityConditionalAccessNamedLocation @updateParams
         [System.Windows.Forms.MessageBox]::Show("Named Location renamed successfully!", "Success")
         
         # Small delay before refresh
@@ -4193,6 +4442,7 @@ try {
     Write-Host "  - Named Location management with checkbox country selector" -ForegroundColor White
     Write-Host "" -ForegroundColor White
     $mainForm = Create-MainForm
+    $script:mainForm = $mainForm  # Store reference for authentication
     Write-Host "Showing form..." -ForegroundColor Green
     [void]$mainForm.ShowDialog()
 } catch {
