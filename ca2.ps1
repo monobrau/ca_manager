@@ -2,7 +2,7 @@
 .SYNOPSIS
     A GUI-based PowerShell script to manage Microsoft Entra Conditional Access policies.
 .NOTES
-    Version: 3.14 (WCM: prefer REST token + -AccessToken before MSAL secret; WCM combo wins when -TenantId matches selected tenant)
+    Version: 3.15 (Graph auth row: panel height from controls + tab below header; title shows v3.15 — rebuild .exe to pick up UI)
     Requirements: Windows PowerShell 5.1 with Microsoft.Graph module
 #>
 
@@ -20,7 +20,7 @@ function Write-Host {
 }
 
 # Single source for About / troubleshooting (EXE users must rebuild to embed updates).
-$script:CAManagerVersion = '3.14'
+$script:CAManagerVersion = '3.15'
 
 # Check PowerShell version first (before loading anything)
 # PowerShell Core is now supported
@@ -351,6 +351,7 @@ $script:disconnectButton = $null
 $script:reconnectButton = $null
 $script:resetAuthButton = $null
 $script:wcmTenantCombo = $null
+$script:wcmRefreshButton = $null
 # Index-aligned with ComboBox.Items: '' = interactive, else WCM tenant GUID (reliable in PowerShell WinForms; ValueMember on PSCustomObject is flaky).
 $script:wcmComboTenantIds = @()
 # Friendly names learned this session (Graph org lookup); fills in when WCM list would show only GUIDs
@@ -1229,6 +1230,9 @@ function Update-ConnectionUI {
 
     if ($script:wcmTenantCombo -and -not $script:wcmTenantCombo.IsDisposed) {
         $script:wcmTenantCombo.Enabled = -not $global:isConnected -and -not $script:isConnecting
+    }
+    if ($script:wcmRefreshButton -and -not $script:wcmRefreshButton.IsDisposed) {
+        $script:wcmRefreshButton.Enabled = -not $global:isConnected -and -not $script:isConnecting
     }
 }
 
@@ -4779,14 +4783,15 @@ Note: Git changes apply when you run .\ca2.ps1 or ca_manager.bat. A compiled .ex
 
 function Create-MainForm {
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Conditional Access Management Tool"
+    $form.Text = "Conditional Access Management Tool v$($script:CAManagerVersion)"
     $form.Size = New-Object System.Drawing.Size(1000, 700)
     $form.StartPosition = "CenterScreen"
 
-    # Connection Buttons Panel (second row: WCM / interactive sign-in like ESR/XOA)
+    # Header: row 1 = actions; row 2 = Graph auth. Height is set after children are added so row 2 is never clipped.
     $connectionPanel = New-Object System.Windows.Forms.Panel
     $connectionPanel.Location = New-Object System.Drawing.Point(10, 10)
-    $connectionPanel.Size = New-Object System.Drawing.Size(970, 68)
+    $connectionPanel.Width = 970
+    $connectionPanel.Height = 96
     $form.Controls.Add($connectionPanel)
 
     # Connect Button
@@ -4837,32 +4842,6 @@ function Create-MainForm {
     })
     $connectionPanel.Controls.Add($script:resetAuthButton)
 
-    $authLbl = New-Object System.Windows.Forms.Label
-    $authLbl.Text = "Graph sign-in:"
-    $authLbl.Location = New-Object System.Drawing.Point(0, 42)
-    $authLbl.Size = New-Object System.Drawing.Size(78, 22)
-    $connectionPanel.Controls.Add($authLbl)
-
-    $script:wcmTenantCombo = New-Object System.Windows.Forms.ComboBox
-    $script:wcmTenantCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-    $script:wcmTenantCombo.Location = New-Object System.Drawing.Point(82, 38)
-    $script:wcmTenantCombo.Size = New-Object System.Drawing.Size(318, 28)
-    $connectionPanel.Controls.Add($script:wcmTenantCombo)
-    Update-WcmAuthComboBox
-
-    $toolkitAppButton = New-Object System.Windows.Forms.Button
-    $toolkitAppButton.Text = "Toolkit app"
-    $toolkitAppButton.Location = New-Object System.Drawing.Point(408, 36)
-    $toolkitAppButton.Size = New-Object System.Drawing.Size(102, 28)
-    $toolkitAppButton.BackColor = [System.Drawing.Color]::LightSteelBlue
-    $toolkitAppButton.Add_Click({ Show-GraphToolkitProvisionerDialog })
-    $connectionPanel.Controls.Add($toolkitAppButton)
-    $wcmToolTip = New-Object System.Windows.Forms.ToolTip
-    $wcmTipText = "App-only: client id and secret stored as EOA-GraphApp-{tenant} or ESR-GraphApp-{tenant} in Windows Credential Manager (same as Entra Secret Rotate / Exchange Online Analyzer). Use Scripts\New-UnifiedGraphToolkitApp.ps1 -SaveToWCM to store them."
-    [void]$wcmToolTip.SetToolTip($script:wcmTenantCombo, $wcmTipText)
-    [void]$wcmToolTip.SetToolTip($authLbl, $wcmTipText)
-    [void]$wcmToolTip.SetToolTip($toolkitAppButton, "Add/fix Graph API permissions, full provisioner wizard, or delete toolkit registrations (like New-UnifiedGraphToolkitApp.ps1 / XOA remove-app). Opens PowerShell.")
-
     # Status Label (X must clear Reset Auth: 470+100; leave a small gap before About ~790)
     $script:statusLabel = New-Object System.Windows.Forms.Label
     $script:statusLabel.Text = "Not connected"
@@ -4882,7 +4861,6 @@ function Create-MainForm {
         Show-AboutDialog
     })
     $connectionPanel.Controls.Add($aboutButton)
-    $aboutButton.BringToFront()
 
     # Help Button
     $helpButton = New-Object System.Windows.Forms.Button
@@ -4895,12 +4873,66 @@ function Create-MainForm {
         Show-HelpDialog
     })
     $connectionPanel.Controls.Add($helpButton)
-    $helpButton.BringToFront()
 
-    # Tab Control
+    # Row 2: Graph auth (added after row 1 so combo/labels are not hidden behind About/Help on some DPI settings)
+    $authLbl = New-Object System.Windows.Forms.Label
+    $authLbl.Text = "Graph auth:"
+    $authLbl.Location = New-Object System.Drawing.Point(0, 54)
+    $authLbl.Size = New-Object System.Drawing.Size(88, 22)
+    $authLbl.AutoSize = $false
+    $connectionPanel.Controls.Add($authLbl)
+
+    $script:wcmTenantCombo = New-Object System.Windows.Forms.ComboBox
+    $script:wcmTenantCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $script:wcmTenantCombo.Location = New-Object System.Drawing.Point(92, 50)
+    $script:wcmTenantCombo.Size = New-Object System.Drawing.Size(340, 28)
+    $connectionPanel.Controls.Add($script:wcmTenantCombo)
+    Update-WcmAuthComboBox
+
+    $script:wcmRefreshButton = New-Object System.Windows.Forms.Button
+    $script:wcmRefreshButton.Text = "Refresh WCM"
+    $script:wcmRefreshButton.Location = New-Object System.Drawing.Point(438, 48)
+    $script:wcmRefreshButton.Size = New-Object System.Drawing.Size(96, 28)
+    $script:wcmRefreshButton.BackColor = [System.Drawing.Color]::LightBlue
+    $script:wcmRefreshButton.Add_Click({ Update-WcmAuthComboBox })
+    $connectionPanel.Controls.Add($script:wcmRefreshButton)
+
+    $toolkitAppButton = New-Object System.Windows.Forms.Button
+    $toolkitAppButton.Text = "Toolkit app"
+    $toolkitAppButton.Location = New-Object System.Drawing.Point(540, 48)
+    $toolkitAppButton.Size = New-Object System.Drawing.Size(102, 28)
+    $toolkitAppButton.BackColor = [System.Drawing.Color]::LightSteelBlue
+    $toolkitAppButton.Add_Click({ Show-GraphToolkitProvisionerDialog })
+    $connectionPanel.Controls.Add($toolkitAppButton)
+
+    $wcmToolTip = New-Object System.Windows.Forms.ToolTip
+    $wcmTipText = "Choose Interactive (browser) or a tenant from Windows Credential Manager (app-only). Same secrets as EOA / ESR: EOA-GraphApp-{tenant} or ESR-GraphApp-{tenant}. Use Toolkit app or New-UnifiedGraphToolkitApp.ps1 -SaveToWCM."
+    [void]$wcmToolTip.SetToolTip($script:wcmTenantCombo, $wcmTipText)
+    [void]$wcmToolTip.SetToolTip($authLbl, $wcmTipText)
+    [void]$wcmToolTip.SetToolTip($wcmRefreshButton, "Re-scan Credential Manager for EOA/ESR Graph app entries.")
+    [void]$wcmToolTip.SetToolTip($toolkitAppButton, "Add/fix Graph API permissions, full provisioner wizard, or delete toolkit registrations (like New-UnifiedGraphToolkitApp.ps1 / XOA remove-app). Opens PowerShell.")
+
+    $maxBottom = 0
+    foreach ($c in $connectionPanel.Controls) {
+        try {
+            if ($c.Bottom -gt $maxBottom) { $maxBottom = [int]$c.Bottom }
+        } catch { }
+    }
+    if ($maxBottom -lt 72) { $maxBottom = 72 }
+    $connectionPanel.Height = [Math]::Max(96, $maxBottom + 16)
+
+    $connectionPanel.PerformLayout()
+    $tabTop = $connectionPanel.Top + $connectionPanel.Height + 10
+    if ($tabTop -lt 95) { $tabTop = 95 }
+
+    # Tab Control — Y derived from header panel so it never covers Graph auth (even with DPI / old manual heights)
     $tabControl = New-Object System.Windows.Forms.TabControl
-    $tabControl.Location = New-Object System.Drawing.Point(10, 82)
-    $tabControl.Size = New-Object System.Drawing.Size(960, 563)
+    $tabControl.Location = New-Object System.Drawing.Point(10, $tabTop)
+    $tabOuterH = 700
+    try { $tabOuterH = [int]$form.Height } catch { }
+    $tabH = $tabOuterH - $tabTop - 45
+    if ($tabH -lt 420) { $tabH = 420 }
+    $tabControl.Size = New-Object System.Drawing.Size(960, $tabH)
     $form.Controls.Add($tabControl)
 
     # Named Locations Tab

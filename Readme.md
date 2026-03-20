@@ -64,9 +64,9 @@ A powerful GUI-based PowerShell tool for managing Microsoft Entra (Azure AD) Con
 - **Windows 10/11** or **Windows Server 2016+**
 - **PowerShell 5.1** or later
 - **Microsoft.Graph PowerShell module**
-- **Microsoft Entra admin permissions**:
+- **Microsoft Entra admin permissions** (delegated **or** application on the same multi-purpose app you save to WCM):
   - `Policy.Read.All`
-  - `Policy.ReadWrite.ConditionalAccess`
+  - `Policy.ReadWrite.ConditionalAccess` (required for app-only policy changes; grant **application** permission + admin consent on the Graph app)
   - `User.Read.All`
   - `Group.Read.All`
   - `Organization.Read.All`
@@ -119,12 +119,12 @@ A powerful GUI-based PowerShell tool for managing Microsoft Entra (Azure AD) Con
 
 ### Connecting to Microsoft Graph
 
-1. Under **Graph sign-in**, choose **Interactive** (browser sign-in) or a **tenant** listed from Windows Credential Manager (WCM). WCM entries use the same **EOA-GraphApp-** / **ESR-GraphApp-** client-secret keys as Exchange Online Analyzer and Entra Secret Rotate when you provision with **`New-UnifiedGraphToolkitApp.ps1 -SaveToWCM`**.
+1. Under **Graph auth** (second row under the connect buttons), open the dropdown and choose **Interactive (browser / device code)** or a **tenant** from Windows Credential Manager (WCM). Use **Refresh WCM** if you just saved new secrets. WCM entries use the same **EOA-GraphApp-** / **ESR-GraphApp-** targets as Exchange Online Analyzer and Entra Secret Rotate when you provision with **`New-UnifiedGraphToolkitApp.ps1 -SaveToWCM`**.
 2. Click **"Connect to Microsoft Graph"**
 3. For **Interactive**, complete the browser flow and grant permissions. For a **WCM tenant**, the tool connects with **client credentials** (app-only); the status line shows **(app-only)** when applicable.
 4. The status shows your connected tenant.
 
-**Reconnect / Change tenant** always uses **interactive** sign-in (delegated). To switch to another WCM app-only tenant, disconnect first, pick the tenant in **Graph sign-in**, then connect again.
+**Reconnect / Change tenant** uses the same rules as **Connect**: if **Graph sign-in** on the main window is set to a **WCM tenant** and you leave the tenant ID box blank (or enter the same GUID), you reconnect **app-only**. Enter a different tenant/domain for **interactive** delegated sign-in. To switch WCM tenants, change **Graph sign-in** first, then reconnect or connect.
 
 ### Managing Named Locations
 
