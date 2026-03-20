@@ -2,7 +2,7 @@
 .SYNOPSIS
     A GUI-based PowerShell script to manage Microsoft Entra Conditional Access policies.
 .NOTES
-    Version: 3.5 (Added Reset Auth, connection state tracking, help dialog, and tooltips)
+    Version: 3.14 (WCM: prefer REST token + -AccessToken before MSAL secret; WCM combo wins when -TenantId matches selected tenant)
     Requirements: Windows PowerShell 5.1 with Microsoft.Graph module
 #>
 
@@ -18,6 +18,9 @@ function Write-Host {
     )
     # Do nothing - suppress all Write-Host output
 }
+
+# Single source for About / troubleshooting (EXE users must rebuild to embed updates).
+$script:CAManagerVersion = '3.14'
 
 # Check PowerShell version first (before loading anything)
 # PowerShell Core is now supported
@@ -262,6 +265,12 @@ if (-not $modulesLoaded) {
     exit
 }
 
+$script:CAManagerScriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$script:GraphAppCredentialModulePath = Join-Path $script:CAManagerScriptRoot 'Modules\GraphAppCredential.psm1'
+if (Test-Path $script:GraphAppCredentialModulePath) {
+    Import-Module $script:GraphAppCredentialModulePath -Force -ErrorAction SilentlyContinue
+}
+
 # PowerShell Core compatible InputBox function
 function Show-InputBox {
     param(
@@ -341,6 +350,144 @@ $script:connectButton = $null
 $script:disconnectButton = $null
 $script:reconnectButton = $null
 $script:resetAuthButton = $null
+$script:wcmTenantCombo = $null
+# Index-aligned with ComboBox.Items: '' = interactive, else WCM tenant GUID (reliable in PowerShell WinForms; ValueMember on PSCustomObject is flaky).
+$script:wcmComboTenantIds = @()
+# Friendly names learned this session (Graph org lookup); fills in when WCM list would show only GUIDs
+$script:wcmTenantDisplayNameCache = @{}
+
+function Test-CAManagerWcmDisplayTextLooksLikeIdOnly {
+    param([string]$DisplayText, [string]$TenantId)
+    if ([string]::IsNullOrWhiteSpace($DisplayText) -or [string]::IsNullOrWhiteSpace($TenantId)) { return $true }
+    $base = $DisplayText -replace ' \(ESR\)\s*$', ''
+    return ($base.Trim() -ieq $TenantId.Trim())
+}
+
+function Get-CAManagerNormalizedTenantCacheKey {
+    param([string]$TenantId)
+    if ([string]::IsNullOrWhiteSpace($TenantId)) { return $null }
+    try {
+        return ([guid]($TenantId.Trim())).ToString('d')
+    } catch {
+        return ($TenantId.Trim() -replace '[\{\}]', '').ToLowerInvariant()
+    }
+}
+
+function Register-CAManagerTenantDisplayNameCache {
+    param([string]$TenantId, [string]$DisplayName)
+    if ([string]::IsNullOrWhiteSpace($TenantId) -or [string]::IsNullOrWhiteSpace($DisplayName)) { return }
+    if ($DisplayName.Trim() -ieq $TenantId.Trim()) { return }
+    $key = Get-CAManagerNormalizedTenantCacheKey -TenantId $TenantId
+    if (-not $key) { return }
+    $script:wcmTenantDisplayNameCache[$key] = $DisplayName.Trim()
+}
+
+function Get-CAManagerMergedWcmTenants {
+    if (-not (Get-Command Get-WCMTenantListWithNames -ErrorAction SilentlyContinue)) { return @() }
+    $byId = @{}
+    foreach ($pfx in @('EOA', 'ESR')) {
+        foreach ($row in @(Get-WCMTenantListWithNames -Prefix $pfx -ErrorAction SilentlyContinue)) {
+            $tid = [string]$row.TenantId
+            $text = [string]$row.DisplayText
+            if (-not $byId.ContainsKey($tid)) {
+                $byId[$tid] = $text
+                continue
+            }
+            $cur = $byId[$tid]
+            $curIdOnly = Test-CAManagerWcmDisplayTextLooksLikeIdOnly -DisplayText $cur -TenantId $tid
+            $newIdOnly = Test-CAManagerWcmDisplayTextLooksLikeIdOnly -DisplayText $text -TenantId $tid
+            if ($curIdOnly -and -not $newIdOnly) {
+                $byId[$tid] = $text
+            } elseif (-not $curIdOnly -and -not $newIdOnly) {
+                if ($cur -match ' \(ESR\)\s*$' -and $text -notmatch ' \(ESR\)\s*$') {
+                    $byId[$tid] = $text
+                }
+            }
+        }
+    }
+    $list = foreach ($kv in $byId.GetEnumerator()) {
+        $tid = [string]$kv.Key
+        $disp = [string]$kv.Value
+        $cacheKey = Get-CAManagerNormalizedTenantCacheKey -TenantId $tid
+        if ($cacheKey -and (Test-CAManagerWcmDisplayTextLooksLikeIdOnly -DisplayText $disp -TenantId $tid) -and $script:wcmTenantDisplayNameCache.ContainsKey($cacheKey)) {
+            $disp = $script:wcmTenantDisplayNameCache[$cacheKey]
+        }
+        [pscustomobject]@{ TenantId = $tid; DisplayText = $disp }
+    }
+    return @($list | Sort-Object DisplayText)
+}
+
+function Update-WcmAuthComboBox {
+    if (-not $script:wcmTenantCombo -or $script:wcmTenantCombo.IsDisposed) { return }
+    $script:wcmTenantCombo.Items.Clear()
+    $script:wcmTenantCombo.DisplayMember = [string]::Empty
+    $script:wcmTenantCombo.ValueMember = [string]::Empty
+    $idList = New-Object System.Collections.Generic.List[string]
+    [void]$idList.Add('')
+    [void]$script:wcmTenantCombo.Items.Add('Interactive (browser / device code)')
+    foreach ($t in @(Get-CAManagerMergedWcmTenants)) {
+        [void]$script:wcmTenantCombo.Items.Add([string]$t.DisplayText)
+        [void]$idList.Add([string]$t.TenantId)
+    }
+    $script:wcmComboTenantIds = $idList.ToArray()
+    if ($script:wcmTenantCombo.Items.Count -gt 0) {
+        $script:wcmTenantCombo.SelectedIndex = 0
+    }
+}
+
+function Get-CAManagerWcmTenantIdFromCombo {
+    <#
+    .SYNOPSIS
+        Tenant GUID for WCM app-only sign-in from the Graph sign-in combo, or $null for Interactive.
+    .NOTES
+        Uses $script:wcmComboTenantIds[SelectedIndex]. ESR uses PSCustomObject+ValueMember in full .NET; in PowerShell
+        WinForms that often fails to surface TenantId, which falls through to interactive Graph sign-in.
+    #>
+    if (-not $script:wcmTenantCombo -or $script:wcmTenantCombo.IsDisposed) { return $null }
+    $idx = $script:wcmTenantCombo.SelectedIndex
+    if ($idx -lt 1) { return $null }
+    if (-not $script:wcmComboTenantIds -or $idx -ge $script:wcmComboTenantIds.Count) { return $null }
+    $tid = $script:wcmComboTenantIds[$idx]
+    if ([string]::IsNullOrWhiteSpace($tid)) { return $null }
+    return $tid.Trim()
+}
+
+function New-CAManagerSecureStringPlain {
+    param([Parameter(Mandatory = $true)][string]$Plain)
+    try {
+        return ConvertTo-SecureString -String $Plain -AsPlainText -Force -ErrorAction Stop
+    } catch {
+        $sec = New-Object System.Security.SecureString
+        foreach ($ch in $Plain.ToCharArray()) {
+            $sec.AppendChar($ch)
+        }
+        return $sec
+    }
+}
+
+function Get-GraphToolkitClientId {
+    foreach ($k in @('M365_GRAPH_TOOLKIT_CLIENT_ID', 'CA_MANAGER_GRAPH_CLIENT_ID')) {
+        foreach ($scope in @('Process', 'User', 'Machine')) {
+            $v = [Environment]::GetEnvironmentVariable($k, $scope)
+            if (-not [string]::IsNullOrWhiteSpace($v)) { return $v.Trim() }
+        }
+    }
+    return $null
+}
+
+function Connect-MgGraphForCAManager {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Scopes,
+        [string]$TenantId,
+        [switch]$UseDeviceAuthentication
+    )
+    $p = @{ Scopes = $Scopes; ErrorAction = 'Stop' }
+    $cid = Get-GraphToolkitClientId
+    if ($cid) { $p['ClientId'] = $cid }
+    if ($TenantId) { $p['TenantId'] = $TenantId }
+    if ($UseDeviceAuthentication) { $p['UseDeviceAuthentication'] = $true }
+    Connect-MgGraph @p
+}
 
 # Microsoft Graph Functions
 function Reset-Authentication {
@@ -367,27 +514,128 @@ function Reset-Authentication {
     }
     
     Update-ConnectionUI
+    Update-WcmAuthComboBox
     [System.Windows.Forms.MessageBox]::Show("Authentication state has been reset. You can now attempt to connect again.", "Auth Reset", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+}
+
+function Test-TenantIdentifier {
+    <#
+    .SYNOPSIS
+        Validates tenant GUID or domain-style string before Connect-MgGraph (rejects control/shell metacharacters).
+    #>
+    param([string]$TenantIdentifier)
+    if ([string]::IsNullOrWhiteSpace($TenantIdentifier)) { return $true }
+    $t = $TenantIdentifier.Trim()
+    if ($t.Length -gt 256) { return $false }
+    if ($t -notmatch '^[a-zA-Z0-9.-]+$') { return $false }
+    if ($t -match '\.\.' -or $t.StartsWith('.') -or $t.EndsWith('.')) { return $false }
+    if ($t -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return $true }
+    if ($t -match '^[a-zA-Z0-9]') { return $true }
+    return $false
+}
+
+function Normalize-GraphScopeShortName {
+    param([string]$Scope)
+    if ([string]::IsNullOrWhiteSpace($Scope)) { return $null }
+    $s = $Scope.Trim()
+    if ($s -match '(?i)^https://graph\.microsoft\.com/(.+)$') { return $matches[1].ToLowerInvariant() }
+    if ($s -match '(?i)^https://graph\.microsoft\.com$') { return $null }
+    return $s.ToLowerInvariant()
+}
+
+function Test-TenantIdStringsMatch {
+    param([string]$A, [string]$B)
+    if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return $false }
+    try {
+        return ([guid]$A.Trim()) -eq ([guid]$B.Trim())
+    } catch {
+        return ($A.Trim().Equals($B.Trim(), [System.StringComparison]::OrdinalIgnoreCase))
+    }
+}
+
+function Test-CAManagerDelegatedScopesPresent {
+    param(
+        $MgContext,
+        [string[]]$RequiredScopes
+    )
+    if (-not $MgContext -or -not $MgContext.TenantId) { return $false }
+    $authType = $null
+    foreach ($prop in @('AuthType', 'AuthenticationType')) {
+        if ($MgContext.PSObject.Properties[$prop]) {
+            $authType = [string]$MgContext.$prop
+            break
+        }
+    }
+    if ($authType -and [string]$authType -match '(?i)AppOnly') {
+        return $false
+    }
+    $scopeList = $null
+    if ($MgContext.PSObject.Properties['Scopes']) { $scopeList = $MgContext.Scopes }
+    if (-not $scopeList -or ($scopeList | Measure-Object).Count -eq 0) { return $false }
+
+    $granted = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($sc in @($scopeList)) {
+        $short = Normalize-GraphScopeShortName ([string]$sc)
+        if ($short) { [void]$granted.Add($short) }
+    }
+    $hasPolicyRead = $granted.Contains('policy.read.all')
+    $hasPolicyRWAll = $granted.Contains('policy.readwrite.all')
+    $hasPolicyCARW = $granted.Contains('policy.readwrite.conditionalaccess')
+
+    foreach ($req in $RequiredScopes) {
+        $r = $req.Trim().ToLowerInvariant()
+        if ($r -eq 'policy.read.all') {
+            if (-not $hasPolicyRead -and -not $hasPolicyRWAll -and -not $hasPolicyCARW) { return $false }
+            continue
+        }
+        if ($r -eq 'policy.readwrite.conditionalaccess') {
+            if (-not $hasPolicyCARW -and -not $hasPolicyRWAll) { return $false }
+            continue
+        }
+        if (-not $granted.Contains($r)) { return $false }
+    }
+    return $true
+}
+
+function Complete-GraphConnectionFromContext {
+    param($Token)
+    Hide-ConsoleWindow
+    $global:isConnected = $true
+    $global:tenantId = $Token.TenantId
+    $global:tenantDisplayName = $global:tenantId
+    try {
+        $org = Get-MgOrganization -Top 1 -ErrorAction SilentlyContinue
+        if ($org -and $org.DisplayName) {
+            $global:tenantDisplayName = $org.DisplayName
+            Register-CAManagerTenantDisplayNameCache -TenantId $global:tenantId -DisplayName $org.DisplayName
+        }
+    } catch { }
+    $script:isConnecting = $false
+    Update-ConnectionUI
+    Update-WcmAuthComboBox
 }
 
 function Connect-GraphAPI {
     param([string]$TenantId)
+
+    if ($TenantId) { $TenantId = $TenantId.Trim() }
+    if ([string]::IsNullOrWhiteSpace($TenantId)) { $TenantId = $null }
     
     # Prevent multiple simultaneous connection attempts
     if ($script:isConnecting) {
         [System.Windows.Forms.MessageBox]::Show("A connection attempt is already in progress. Please wait or use 'Reset Auth' if it appears stuck.", "Connection In Progress", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
         return $false
     }
-    
-    # Clear any stuck authentication state before attempting connection
-    try {
-        Disconnect-MgGraph -ErrorAction SilentlyContinue
-    } catch {
-        # Ignore errors - we're just clearing potential stuck state
+
+    if ($TenantId -and -not (Test-TenantIdentifier -TenantIdentifier $TenantId)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "The tenant value is not in a recognized safe format.`n`nUse your tenant GUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), a verified domain such as contoso.onmicrosoft.com, or leave blank for the default account tenant.",
+            "Invalid Tenant Identifier",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        return $false
     }
-    
-    $script:isConnecting = $true
-    Update-ConnectionUI
     
     $requiredScopes = @(
         "Policy.Read.All",
@@ -397,74 +645,211 @@ function Connect-GraphAPI {
         "Organization.Read.All"
     )
 
-    try {
-        # For EXE versions, ensure the main form is visible and bring it to front
-        # This helps WAM authentication find the parent window handle
-        if ($script:mainForm -and -not $script:mainForm.IsDisposed) {
-            $script:mainForm.WindowState = [System.Windows.Forms.FormWindowState]::Normal
-            $script:mainForm.BringToFront()
-            $script:mainForm.Activate()
-            $script:mainForm.Focus()
-            
-            # Force the form to be visible and on top
-            [System.Windows.Forms.Application]::DoEvents()
+    # WCM when combo picks a stored tenant: no -TenantId, or -TenantId matches that row (Reconnect with same GUID no longer forces browser).
+    $useWcm = $false
+    $wcmTenantId = $null
+    $wcmFromCombo = Get-CAManagerWcmTenantIdFromCombo
+    if ($wcmFromCombo) {
+        if (-not $TenantId) {
+            $useWcm = $true
+            $wcmTenantId = $wcmFromCombo
+        } elseif (Test-TenantIdStringsMatch -A $TenantId -B $wcmFromCombo) {
+            $useWcm = $true
+            $wcmTenantId = $wcmFromCombo
         }
-        
-        # Attempt connection with error handling
-        # Use standard interactive browser authentication (WAM will be used automatically on Windows)
-        # Note: The form must be visible for WAM to work properly in EXE mode
-        # Suppress WAM warnings (they appear as informational messages, not critical)
-        $originalWarningPreference = $WarningPreference
-        $WarningPreference = 'SilentlyContinue'
-        try {
-            if ($TenantId) {
-                Connect-MgGraph -Scopes $requiredScopes -TenantId $TenantId -ErrorAction Stop
+    } elseif ($script:wcmTenantCombo -and -not $script:wcmTenantCombo.IsDisposed -and $script:wcmTenantCombo.SelectedIndex -gt 0) {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "A tenant from Credential Manager is selected, but its ID could not be read. Click Reset Auth, reopen the app, or pick Interactive.`n`nIf this persists, file an issue (PowerShell WinForms combo binding).",
+            "Graph sign-in",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        return $false
+    }
+
+    $existingCtx = $null
+    try { $existingCtx = Get-MgContext -ErrorAction SilentlyContinue } catch { $existingCtx = $null }
+
+    # Do not offer delegated-session reuse when the user chose a WCM row (app-only intent).
+    if (-not $useWcm -and -not $wcmTenantId -and $existingCtx -and $existingCtx.TenantId) {
+        $tenantMatches = (-not $TenantId) -or (Test-TenantIdStringsMatch -A $existingCtx.TenantId -B $TenantId)
+        $scopesOk = Test-CAManagerDelegatedScopesPresent -MgContext $existingCtx -RequiredScopes $requiredScopes
+        if ($tenantMatches -and $scopesOk) {
+            $autoReuse = $env:CA_MANAGER_AUTO_REUSE_GRAPH -eq '1'
+            $reuse = $false
+            if ($autoReuse) {
+                $reuse = $true
             } else {
-                Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
+                $acct = $null
+                if ($existingCtx.PSObject.Properties['Account']) { $acct = [string]$existingCtx.Account }
+                if ([string]::IsNullOrWhiteSpace($acct)) { $acct = '(signed-in account)' }
+                $msg = "Microsoft Graph is already connected in this PowerShell session with the permissions CA Manager needs.`n`n" +
+                       "This usually happens if you ran Connect-MgGraph in this same window first (for example from Exchange Online Analyzer or Entra Secret Rotate interactive sign-in).`n`n" +
+                       "Account: $acct`nTenant ID: $($existingCtx.TenantId)`n`n" +
+                       "Reuse this sign-in and skip another login?`n`n" +
+                       "Choose No to disconnect and sign in again (same WAM/browser flow as before)."
+                $ans = [System.Windows.Forms.MessageBox]::Show(
+                    $msg,
+                    "Reuse existing Graph session?",
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                    [System.Windows.Forms.MessageBoxIcon]::Question
+                )
+                $reuse = ($ans -eq [System.Windows.Forms.DialogResult]::Yes)
             }
-        } catch {
-            # If window handle error occurs, try device code authentication as fallback
-            # This works better when EXE has console window support
-            if ($_.Exception.Message -like "*window handle*" -or $_.Exception.Message -like "*parent window*") {
-                $WarningPreference = 'Continue'  # Show device code output
-                
-                # Show console window for device code display
-                Show-ConsoleWindow
-                
-                $deviceCodeMsg = "Browser authentication failed. Switching to device code authentication.`n`n" +
-                                "A device code will be displayed in the console window.`n`n" +
-                                "Please:`n" +
-                                "1. Look at the console window for the device code`n" +
-                                "2. Go to https://microsoft.com/devicelogin`n" +
-                                "3. Enter the displayed code`n" +
-                                "4. Complete authentication in your browser`n`n" +
-                                "Click OK to continue with device code authentication."
-                [System.Windows.Forms.MessageBox]::Show($deviceCodeMsg, "Device Code Authentication", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-                
-                # Ensure form is responsive
-                [System.Windows.Forms.Application]::DoEvents()
-                
-                # Use device code authentication - code will display in console
+            if ($reuse) {
                 try {
-                    if ($TenantId) {
-                        Connect-MgGraph -Scopes $requiredScopes -TenantId $TenantId -UseDeviceAuthentication -ErrorAction Stop
-                    } else {
-                        Connect-MgGraph -Scopes $requiredScopes -UseDeviceAuthentication -ErrorAction Stop
-                    }
-                    # Hide console window again after successful authentication
-                    Start-Sleep -Seconds 2
-                    Hide-ConsoleWindow
+                    Complete-GraphConnectionFromContext -Token $existingCtx
+                    return $true
                 } catch {
+                    [System.Windows.Forms.MessageBox]::Show("Could not reuse session: $($_.Exception.Message)", "Reuse failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                }
+            }
+        }
+    }
+
+    try {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue
+    } catch {
+        # Ignore errors - we're just clearing potential stuck state
+    }
+    
+    $script:isConnecting = $true
+    Update-ConnectionUI
+
+    try {
+        if ($useWcm) {
+            if (-not (Get-Command Get-GraphAppCredentialFromWCM -ErrorAction SilentlyContinue)) {
+                throw "GraphAppCredential module not loaded. Ensure Modules\GraphAppCredential.psm1 is next to this script."
+            }
+            $cred = $null
+            $credPrefix = 'EOA'
+            foreach ($pfx in @('EOA', 'ESR')) {
+                $cred = Get-GraphAppCredentialFromWCM -TenantId $wcmTenantId -Prefix $pfx -ErrorAction SilentlyContinue
+                if ($cred) { $credPrefix = $pfx; break }
+            }
+            if (-not $cred) {
+                throw (
+                    "No app credentials in Windows Credential Manager for tenant $wcmTenantId.`n`n" +
+                    "Save the client secret for this tenant (same app as Exchange Online Analyzer / Entra Secret Rotate / River Run Security Investigator):`n" +
+                    "  - CA Manager: Toolkit app - enable Save to Windows Credential Manager - Update permissions or Full wizard (admin sign-in).`n" +
+                    "  - Or run: .\Scripts\New-UnifiedGraphToolkitApp.ps1 -SaveToWCM`n" +
+                    "  - Or XOA: New-GraphInboxRulesApp.ps1 -SaveToWCM`n`n" +
+                    "Stored targets look like: EOA-GraphApp-{tenantGuid} and ESR-GraphApp-{tenantGuid}. Check: cmdkey /list (look for GraphApp).`n`n" +
+                    "To connect without a stored secret, choose Interactive (browser / device code) in the Graph sign-in dropdown instead of this tenant."
+                )
+            }
+            $tidForMg = ($cred.TenantId -replace '[\{\}]', '').Trim()
+            if ([string]::IsNullOrWhiteSpace($tidForMg)) { $tidForMg = ($wcmTenantId -replace '[\{\}]', '').Trim() }
+
+            # Same env as exchangeonlineanalyzer\New-GraphInboxRulesApp.ps1: some Graph/MSAL stacks still use WAM unless broker is off.
+            $wcmBrokerKeys = @('AZURE_IDENTITY_DISABLE_BROKER', 'MSAL_DISABLE_BROKER')
+            $wcmBrokerPrev = @{}
+            foreach ($bk in $wcmBrokerKeys) {
+                $wcmBrokerPrev[$bk] = [Environment]::GetEnvironmentVariable($bk, 'Process')
+            }
+            try {
+                [Environment]::SetEnvironmentVariable('AZURE_IDENTITY_DISABLE_BROKER', 'true', 'Process')
+                [Environment]::SetEnvironmentVariable('MSAL_DISABLE_BROKER', '1', 'Process')
+
+                # Prefer OAuth2 client_credentials via REST + -AccessToken first so MSAL/WAM never runs (avoids "Pick an account").
+                # Then AppSecretCredentialParameterSet: PSCredential UserName = client id, Password = secret — not -ClientId/-ClientSecret (interactive set).
+                $wcmConnected = $false
+                $plainToken = Get-GraphAppTokenFromWCM -TenantId $wcmTenantId -Prefix $credPrefix -ErrorAction SilentlyContinue
+                if ($plainToken) {
+                    $secTok = $null
+                    try {
+                        $secTok = New-CAManagerSecureStringPlain -Plain $plainToken
+                        Connect-MgGraph -AccessToken $secTok -NoWelcome -ErrorAction Stop | Out-Null
+                        $wcmConnected = $true
+                    } catch {
+                        # Fall through to client secret credential path.
+                    } finally {
+                        $plainToken = [string]::Empty
+                        $secTok = $null
+                    }
+                }
+                if (-not $wcmConnected) {
+                    $secSecret = $null
+                    $clientSecretCredential = $null
+                    try {
+                        $secSecret = New-CAManagerSecureStringPlain -Plain $cred.ClientSecret
+                        $clientSecretCredential = New-Object System.Management.Automation.PSCredential($cred.ClientId.Trim(), $secSecret)
+                        Connect-MgGraph -ClientSecretCredential $clientSecretCredential -TenantId $tidForMg -NoWelcome -ErrorAction Stop | Out-Null
+                        $wcmConnected = $true
+                    } catch {
+                        # Both paths failed; message below.
+                    } finally {
+                        $clientSecretCredential = $null
+                        $secSecret = $null
+                    }
+                }
+                if (-not $wcmConnected) {
+                    throw "Could not connect with app token or client secret for tenant $wcmTenantId. Update Microsoft.Graph.Authentication, verify WCM credentials, and app registration (client id/secret)."
+                }
+            } finally {
+                foreach ($bk in $wcmBrokerKeys) {
+                    $pv = $wcmBrokerPrev[$bk]
+                    if ([string]::IsNullOrEmpty($pv)) {
+                        [Environment]::SetEnvironmentVariable($bk, $null, 'Process')
+                    } else {
+                        [Environment]::SetEnvironmentVariable($bk, $pv, 'Process')
+                    }
+                }
+            }
+            Hide-ConsoleWindow
+        } else {
+            # For EXE versions, ensure the main form is visible and bring it to front
+            # This helps WAM authentication find the parent window handle
+            if ($script:mainForm -and -not $script:mainForm.IsDisposed) {
+                $script:mainForm.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+                $script:mainForm.BringToFront()
+                $script:mainForm.Activate()
+                $script:mainForm.Focus()
+                
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+            
+            $originalWarningPreference = $WarningPreference
+            $WarningPreference = 'SilentlyContinue'
+            try {
+                if ($TenantId) {
+                    Connect-MgGraphForCAManager -Scopes $requiredScopes -TenantId $TenantId
+                } else {
+                    Connect-MgGraphForCAManager -Scopes $requiredScopes
+                }
+            } catch {
+                if ($_.Exception.Message -like "*window handle*" -or $_.Exception.Message -like "*parent window*") {
+                    $WarningPreference = 'Continue'
+                    Show-ConsoleWindow
+                    $deviceCodeMsg = "Browser authentication failed. Switching to device code authentication.`n`n" +
+                                    "A device code will be displayed in the console window.`n`n" +
+                                    "Please:`n" +
+                                    "1. Look at the console window for the device code`n" +
+                                    "2. Go to https://microsoft.com/devicelogin`n" +
+                                    "3. Enter the displayed code`n" +
+                                    "4. Complete authentication in your browser`n`n" +
+                                    "Click OK to continue with device code authentication."
+                    [System.Windows.Forms.MessageBox]::Show($deviceCodeMsg, "Device Code Authentication", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                    [System.Windows.Forms.Application]::DoEvents()
+                    try {
+                        if ($TenantId) {
+                            Connect-MgGraphForCAManager -Scopes $requiredScopes -TenantId $TenantId -UseDeviceAuthentication
+                        } else {
+                            Connect-MgGraphForCAManager -Scopes $requiredScopes -UseDeviceAuthentication
+                        }
+                        Start-Sleep -Seconds 2
+                        Hide-ConsoleWindow
+                    } catch {
+                        $WarningPreference = $originalWarningPreference
+                        throw
+                    }
+                } else {
                     $WarningPreference = $originalWarningPreference
-                    # Keep console visible if authentication failed
                     throw
                 }
-            } else {
+            } finally {
                 $WarningPreference = $originalWarningPreference
-                throw
             }
-        } finally {
-            $WarningPreference = $originalWarningPreference
         }
         
         # Verify connection was successful
@@ -485,6 +870,7 @@ function Connect-GraphAPI {
             $org = Get-MgOrganization -Top 1 -ErrorAction SilentlyContinue
             if ($org -and $org.DisplayName) {
                 $global:tenantDisplayName = $org.DisplayName
+                Register-CAManagerTenantDisplayNameCache -TenantId $global:tenantId -DisplayName $org.DisplayName
                 Write-Host ("Found tenant name: " + $global:tenantDisplayName) -ForegroundColor Green
             } else {
                 Write-Host "Could not retrieve tenant display name, using ID" -ForegroundColor Yellow
@@ -495,6 +881,7 @@ function Connect-GraphAPI {
         
         $script:isConnecting = $false
         Update-ConnectionUI
+        Update-WcmAuthComboBox
         return $true
     } catch {
         $script:isConnecting = $false
@@ -528,6 +915,7 @@ function Disconnect-GraphAPI {
         }
         
         Update-ConnectionUI
+        Update-WcmAuthComboBox
         [System.Windows.Forms.MessageBox]::Show("Disconnected successfully!", "Disconnected")
         return $true
     } catch {
@@ -539,7 +927,7 @@ function Disconnect-GraphAPI {
 function Show-ReconnectDialog {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Reconnect to Tenant"
-    $form.Size = New-Object System.Drawing.Size(400, 200)
+    $form.Size = New-Object System.Drawing.Size(400, 220)
     $form.StartPosition = "CenterParent"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -561,20 +949,20 @@ function Show-ReconnectDialog {
 
     # Tenant ID input
     $tenantLabel = New-Object System.Windows.Forms.Label
-    $tenantLabel.Text = "Tenant ID (leave blank for default):"
-    $tenantLabel.Location = New-Object System.Drawing.Point(10, 60)
-    $tenantLabel.Size = New-Object System.Drawing.Size(200, 20)
+    $tenantLabel.Text = "Tenant ID for interactive sign-in (leave blank for default). For WCM app secret, use Graph sign-in on the main window."
+    $tenantLabel.Location = New-Object System.Drawing.Point(10, 55)
+    $tenantLabel.Size = New-Object System.Drawing.Size(370, 36)
     $form.Controls.Add($tenantLabel)
 
     $tenantTextBox = New-Object System.Windows.Forms.TextBox
-    $tenantTextBox.Location = New-Object System.Drawing.Point(10, 85)
+    $tenantTextBox.Location = New-Object System.Drawing.Point(10, 95)
     $tenantTextBox.Size = New-Object System.Drawing.Size(360, 20)
     $form.Controls.Add($tenantTextBox)
 
     # Buttons
     $connectButton = New-Object System.Windows.Forms.Button
     $connectButton.Text = "Connect"
-    $connectButton.Location = New-Object System.Drawing.Point(210, 120)
+    $connectButton.Location = New-Object System.Drawing.Point(210, 130)
     $connectButton.Size = New-Object System.Drawing.Size(75, 23)
     $connectButton.BackColor = [System.Drawing.Color]::LightGreen
     $connectButton.Add_Click({
@@ -607,11 +995,189 @@ function Show-ReconnectDialog {
 
     $cancelButton = New-Object System.Windows.Forms.Button
     $cancelButton.Text = "Cancel"
-    $cancelButton.Location = New-Object System.Drawing.Point(295, 120)
+    $cancelButton.Location = New-Object System.Drawing.Point(295, 130)
     $cancelButton.Size = New-Object System.Drawing.Size(75, 23)
     $cancelButton.BackColor = [System.Drawing.Color]::LightGray
     $cancelButton.Add_Click({ $form.Close() })
     $form.Controls.Add($cancelButton)
+
+    $form.ShowDialog() | Out-Null
+}
+
+function Format-CAManagerCmdLineToken {
+    param([string]$Text)
+    if ($null -eq $Text) { return '""' }
+    if ($Text -notmatch '[\s"]') { return $Text }
+    return '"' + ($Text -replace '"', '""') + '"'
+}
+
+function Start-CAManagerPowerShellScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [string[]]$Arguments = @()
+    )
+    $root = $script:CAManagerScriptRoot
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+    }
+    $file = Join-Path $root $RelativePath
+    if (-not (Test-Path -LiteralPath $file)) {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "Script not found:`n$file`n`nDeploy the full ca_manager folder (including Scripts), or run the script manually from the repo.",
+            "Graph toolkit app",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+        return $false
+    }
+    # Start-Process -ArgumentList with a string[] joins with spaces WITHOUT quoting; values with spaces break (e.g. -DisplayName).
+    # Pass one command line string with Windows-style quoting instead.
+    $tokens = [System.Collections.Generic.List[string]]::new()
+    # PS 7: Object[] does not bind to AddRange(IEnumerable[string]); must be string[].
+    [void]$tokens.AddRange([string[]]@(
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-NoExit',
+            '-File',
+            (Format-CAManagerCmdLineToken $file)
+        ))
+    $i = 0
+    while ($i -lt $Arguments.Count) {
+        $a = $Arguments[$i]
+        [void]$tokens.Add($a)
+        if ($a -match '^-' -and ($i + 1) -lt $Arguments.Count) {
+            $next = $Arguments[$i + 1]
+            if ($next -notmatch '^-') {
+                [void]$tokens.Add((Format-CAManagerCmdLineToken $next))
+                $i += 2
+                continue
+            }
+        }
+        $i++
+    }
+    $argLine = $tokens -join ' '
+    Start-Process -FilePath 'powershell.exe' -WorkingDirectory $root -ArgumentList $argLine | Out-Null
+    return $true
+}
+
+function Show-GraphToolkitProvisionerDialog {
+    $defaultName = 'River Run Security Investigator'
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Graph toolkit app (permissions / delete)"
+    $form.Size = New-Object System.Drawing.Size(500, 412)
+    $form.StartPosition = "CenterParent"
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+
+    $intro = New-Object System.Windows.Forms.Label
+    $intro.Text = "Opens a separate PowerShell window (WAM sign-in).`n`nDefault app name matches Exchange Online Analyzer: River Run Security Investigator (one Entra registration for CA Manager, ESR, and XOA).`n`nUse an account that can manage app registrations: Application.ReadWrite.All and AppRoleAssignment.ReadWrite.All (e.g. Global Administrator or Cloud Application Administrator)."
+    $intro.Location = New-Object System.Drawing.Point(12, 12)
+    $intro.Size = New-Object System.Drawing.Size(460, 100)
+    $form.Controls.Add($intro)
+
+    $lblDn = New-Object System.Windows.Forms.Label
+    $lblDn.Text = "App registration display name (exact match in Entra):"
+    $lblDn.Location = New-Object System.Drawing.Point(12, 118)
+    $lblDn.Size = New-Object System.Drawing.Size(460, 18)
+    $form.Controls.Add($lblDn)
+
+    $txtDn = New-Object System.Windows.Forms.TextBox
+    $txtDn.Text = $defaultName
+    $txtDn.Location = New-Object System.Drawing.Point(12, 138)
+    $txtDn.Size = New-Object System.Drawing.Size(460, 22)
+    $form.Controls.Add($txtDn)
+
+    $chkMulti = New-Object System.Windows.Forms.CheckBox
+    $chkMulti.Text = "Multi-tenant sign-in audience (AzureADMultipleOrgs)"
+    $chkMulti.Location = New-Object System.Drawing.Point(12, 168)
+    $chkMulti.Size = New-Object System.Drawing.Size(440, 20)
+    $form.Controls.Add($chkMulti)
+
+    $chkNewSecret = New-Object System.Windows.Forms.CheckBox
+    $chkNewSecret.Text = "After update: create a new client secret"
+    $chkNewSecret.Location = New-Object System.Drawing.Point(12, 192)
+    $chkNewSecret.Size = New-Object System.Drawing.Size(440, 20)
+    $form.Controls.Add($chkNewSecret)
+
+    $chkSaveWcm = New-Object System.Windows.Forms.CheckBox
+    $chkSaveWcm.Text = "Save to Windows Credential Manager (EOA + ESR keys; implies new secret when required)"
+    $chkSaveWcm.Location = New-Object System.Drawing.Point(12, 216)
+    $chkSaveWcm.Size = New-Object System.Drawing.Size(460, 20)
+    $form.Controls.Add($chkSaveWcm)
+
+    $chkRemoveWcm = New-Object System.Windows.Forms.CheckBox
+    $chkRemoveWcm.Text = "When deleting apps: also remove local EOA/ESR Graph credentials for that tenant"
+    $chkRemoveWcm.Location = New-Object System.Drawing.Point(12, 240)
+    $chkRemoveWcm.Size = New-Object System.Drawing.Size(460, 36)
+    $form.Controls.Add($chkRemoveWcm)
+
+    $btnUpdate = New-Object System.Windows.Forms.Button
+    $btnUpdate.Text = "Update permissions"
+    $btnUpdate.Location = New-Object System.Drawing.Point(12, 288)
+    $btnUpdate.Size = New-Object System.Drawing.Size(150, 28)
+    $btnUpdate.BackColor = [System.Drawing.Color]::LightGreen
+    $btnUpdate.Add_Click({
+        $dn = $txtDn.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($dn)) {
+            [void][System.Windows.Forms.MessageBox]::Show("Enter the app display name.", "Graph toolkit app", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+        $argList = @('-DisplayName', $dn, '-UpdateExisting')
+        if ($chkMulti.Checked) { $argList += '-MultiTenant' }
+        if ($chkNewSecret.Checked) { $argList += '-NewSecret' }
+        if ($chkSaveWcm.Checked) { $argList += '-SaveToWCM' }
+        if (Start-CAManagerPowerShellScript -RelativePath 'Scripts\New-UnifiedGraphToolkitApp.ps1' -Arguments $argList) { $form.Close() }
+    })
+    $form.Controls.Add($btnUpdate)
+
+    $btnWizard = New-Object System.Windows.Forms.Button
+    $btnWizard.Text = "Full wizard"
+    $btnWizard.Location = New-Object System.Drawing.Point(172, 288)
+    $btnWizard.Size = New-Object System.Drawing.Size(150, 28)
+    $btnWizard.Add_Click({
+        $dn = $txtDn.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($dn)) {
+            [void][System.Windows.Forms.MessageBox]::Show("Enter the app display name.", "Graph toolkit app", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+        $argList = @('-DisplayName', $dn)
+        if ($chkMulti.Checked) { $argList += '-MultiTenant' }
+        if ($chkSaveWcm.Checked) { $argList += '-SaveToWCM' }
+        if (Start-CAManagerPowerShellScript -RelativePath 'Scripts\New-UnifiedGraphToolkitApp.ps1' -Arguments $argList) { $form.Close() }
+    })
+    $form.Controls.Add($btnWizard)
+
+    $btnDelete = New-Object System.Windows.Forms.Button
+    $btnDelete.Text = "Delete matching apps..."
+    $btnDelete.Location = New-Object System.Drawing.Point(12, 322)
+    $btnDelete.Size = New-Object System.Drawing.Size(200, 28)
+    $btnDelete.BackColor = [System.Drawing.Color]::LightCoral
+    $btnDelete.Add_Click({
+        $dn = $txtDn.Text.Trim()
+        if ([string]::IsNullOrWhiteSpace($dn)) {
+            [void][System.Windows.Forms.MessageBox]::Show("Enter the app display name.", "Graph toolkit app", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+        $m1 = "Delete ALL app registrations named exactly:`n`n$dn`n`nA new PowerShell window will open for admin sign-in. Service principals for those apps are removed. This cannot be undone.`n`nContinue?"
+        $r1 = [System.Windows.Forms.MessageBox]::Show($m1, "Delete toolkit apps", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($r1 -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        $r2 = [System.Windows.Forms.MessageBox]::Show("Final confirmation: delete every registration with that display name in the tenant you sign into?", "Confirm delete", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Stop)
+        if ($r2 -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        $argList = @('-DisplayName', $dn, '-Force')
+        if ($chkRemoveWcm.Checked) { $argList += '-RemoveWCM' }
+        if (Start-CAManagerPowerShellScript -RelativePath 'Scripts\Remove-UnifiedGraphToolkitApp.ps1' -Arguments $argList) { $form.Close() }
+    })
+    $form.Controls.Add($btnDelete)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = "Close"
+    $btnClose.Location = New-Object System.Drawing.Point(372, 322)
+    $btnClose.Size = New-Object System.Drawing.Size(100, 28)
+    $btnClose.BackColor = [System.Drawing.Color]::LightGray
+    $btnClose.Add_Click({ $form.Close() })
+    $form.Controls.Add($btnClose)
 
     $form.ShowDialog() | Out-Null
 }
@@ -622,10 +1188,21 @@ function Update-ConnectionUI {
             $script:statusLabel.Text = "Connecting..."
             $script:statusLabel.ForeColor = [System.Drawing.Color]::Orange
         } elseif ($global:isConnected) {
+            $suffix = ""
+            try {
+                $cx = Get-MgContext -ErrorAction SilentlyContinue
+                if ($cx) {
+                    $at = $null
+                    foreach ($p in @('AuthType', 'AuthenticationType')) {
+                        if ($cx.PSObject.Properties[$p]) { $at = [string]$cx.$p; break }
+                    }
+                    if ($at -match '(?i)AppOnly') { $suffix = " (app-only)" }
+                }
+            } catch { }
             if ($global:tenantDisplayName -and $global:tenantDisplayName -ne $global:tenantId) {
-                $script:statusLabel.Text = "Connected to: " + $global:tenantDisplayName
+                $script:statusLabel.Text = "Connected to: " + $global:tenantDisplayName + $suffix
             } else {
-                $script:statusLabel.Text = "Connected to tenant: " + $global:tenantId
+                $script:statusLabel.Text = "Connected to tenant: " + $global:tenantId + $suffix
             }
             $script:statusLabel.ForeColor = [System.Drawing.Color]::Green
         } else {
@@ -648,6 +1225,10 @@ function Update-ConnectionUI {
     
     if ($script:resetAuthButton) {
         $script:resetAuthButton.Enabled = $true  # Always enabled - useful when stuck
+    }
+
+    if ($script:wcmTenantCombo -and -not $script:wcmTenantCombo.IsDisposed) {
+        $script:wcmTenantCombo.Enabled = -not $global:isConnected -and -not $script:isConnecting
     }
 }
 
@@ -1461,6 +2042,9 @@ function Show-CountryLocationDialog {
                         $responseBody = $reader.ReadToEnd()
                         $reader.Close()
                         if ($responseBody) {
+                            if ($responseBody.Length -gt 8192) {
+                                $responseBody = $responseBody.Substring(0, 8192) + "`n... (truncated)"
+                            }
                             # Try to parse as JSON for better formatting
                             try {
                                 $errorObj = $responseBody | ConvertFrom-Json
@@ -1960,110 +2544,148 @@ function Remove-SelectedPolicy {
     }
     
     if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Please select a Conditional Access Policy to delete.", "No Selection")
+        [System.Windows.Forms.MessageBox]::Show("Please select one or more Conditional Access policies to delete.", "No Selection")
         return
     }
 
-    $selectedItem = $listView.SelectedItems[0]
-    $policyName = $selectedItem.Text
-    $policy = $selectedItem.Tag
-    $policyId = $policy.Id
-    $policyState = $policy.State
+    $selected = @($listView.SelectedItems | ForEach-Object {
+        $p = $_.Tag
+        [PSCustomObject]@{
+            Name  = $_.Text
+            Id    = $p.Id
+            State = $p.State
+        }
+    })
 
-    # Enhanced confirmation with policy state warning
-    $confirmMessage = "Are you sure you want to delete the Conditional Access Policy:`n`n"
-    $confirmMessage += "'$policyName'`n`n"
-    $confirmMessage += "Policy State: $policyState`n`n"
-    
-    if ($policyState -eq "enabled") {
-        $confirmMessage += "⚠️ WARNING: This policy is currently ENABLED and may be actively protecting your organization!`n`n"
+    $selectedCount = $selected.Count
+    $plural = if ($selectedCount -eq 1) { "y" } else { "ies" }
+    $confirmMessage = "Are you sure you want to delete $selectedCount Conditional Access polic$plural?`n`n"
+    foreach ($s in $selected) {
+        $confirmMessage += "  - $($s.Name) [State: $($s.State)]`n"
     }
-    
+    $enabledSelected = @($selected | Where-Object { $_.State -eq "enabled" })
+    if ($enabledSelected.Count -gt 0) {
+        $confirmMessage += "`nWARNING: One or more selected policies are ENABLED and may be actively protecting your organization!`n`n"
+    }
     $confirmMessage += "This action cannot be undone!"
 
     $result = [System.Windows.Forms.MessageBox]::Show(
-        $confirmMessage, 
-        "Confirm Delete Policy", 
+        $confirmMessage,
+        "Confirm Delete Polic$plural",
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
         [System.Windows.Forms.MessageBoxIcon]::Warning
     )
     
-    if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
+    if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+        Write-Host "Policy deletion cancelled by user." -ForegroundColor Gray
+        return
+    }
+
+    if ($enabledSelected.Count -gt 0) {
+        $ep = if ($enabledSelected.Count -eq 1) { "y" } else { "ies" }
+        $finalMsg = "FINAL CONFIRMATION:`n`nYou are about to delete $($enabledSelected.Count) ENABLED polic$ep that may be protecting your organization:`n`n"
+        foreach ($s in $enabledSelected) {
+            $finalMsg += "  - $($s.Name)`n"
+        }
+        if ($selectedCount -gt $enabledSelected.Count) {
+            $finalMsg += "`nDisabled policies in your selection will also be deleted.`n"
+        }
+        $finalMsg += "`nAre you absolutely certain you want to proceed?"
+
+        $finalConfirm = [System.Windows.Forms.MessageBox]::Show(
+            $finalMsg,
+            "FINAL WARNING - Delete Enabled Polic$ep",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Stop
+        )
+        if ($finalConfirm -ne [System.Windows.Forms.DialogResult]::Yes) {
+            Write-Host "Policy deletion cancelled by user." -ForegroundColor Yellow
+            return
+        }
+    }
+
+    $deletedCount = 0
+    $skippedCount = 0
+    $errorCount = 0
+    $errors = @()
+
+    foreach ($s in $selected) {
+        $policyName = $s.Name
+        $policyId = $s.Id
         try {
             Write-Host "Deleting Conditional Access Policy: $policyName" -ForegroundColor Yellow
-            
-            # Check if the policy still exists before trying to delete
+
             $existingPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -ErrorAction SilentlyContinue
             if (-not $existingPolicy) {
-                [System.Windows.Forms.MessageBox]::Show("The selected Conditional Access Policy no longer exists. Refreshing list.", "Already Deleted")
-                Refresh-PoliciesList $listView
-                return
+                Write-Host "Skipping '$policyName' - already deleted or missing." -ForegroundColor Yellow
+                $skippedCount++
+                continue
             }
-            
-            # Additional confirmation for enabled policies
-            if ($existingPolicy.State -eq "enabled") {
-                $finalConfirm = [System.Windows.Forms.MessageBox]::Show(
-                    "FINAL CONFIRMATION:`n`nYou are about to delete an ENABLED Conditional Access Policy:`n'$policyName'`n`nThis could immediately impact user access to your organization's resources.`n`nAre you absolutely certain you want to proceed?",
-                    "FINAL WARNING - Delete Enabled Policy",
+
+            if ($existingPolicy.State -eq "enabled" -and $s.State -ne "enabled") {
+                $stateConfirm = [System.Windows.Forms.MessageBox]::Show(
+                    "Policy '$policyName' is now ENABLED (it was not when you selected it). Delete it anyway?",
+                    "Policy State Changed",
                     [System.Windows.Forms.MessageBoxButtons]::YesNo,
                     [System.Windows.Forms.MessageBoxIcon]::Stop
                 )
-                
-                if ($finalConfirm -eq [System.Windows.Forms.DialogResult]::No) {
-                    Write-Host "Policy deletion cancelled by user." -ForegroundColor Yellow
-                    return
+                if ($stateConfirm -ne [System.Windows.Forms.DialogResult]::Yes) {
+                    $skippedCount++
+                    continue
                 }
             }
-            
-            # Perform the deletion with error handling
+
             try {
                 Remove-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -Confirm:$false -ErrorAction Stop
             } catch {
-                # Check if error is "does not exist" - treat as success since policy is already gone
                 if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*" -or $_.Exception.Message -like "*does not exist*") {
-                    Write-Host "Policy was already deleted (does not exist). Treating as successful deletion." -ForegroundColor Yellow
-                    # Continue to success message below
+                    Write-Host "Policy '$policyName' was already removed." -ForegroundColor Yellow
                 } else {
-                    throw  # Re-throw other errors to be caught by outer catch
+                    throw
                 }
             }
-            
-            # Verify deletion succeeded by checking if policy still exists
-            Start-Sleep -Milliseconds 500  # Brief delay for API propagation
+
+            Start-Sleep -Milliseconds 500
             $verifyPolicy = Get-MgIdentityConditionalAccessPolicy -ConditionalAccessPolicyId $policyId -ErrorAction SilentlyContinue
             if ($verifyPolicy) {
-                throw "Policy deletion appeared to succeed but policy still exists. It may have been recreated or deletion is pending."
+                throw "Deletion may have failed; policy still exists."
             }
-            
-            Write-Host "✅ Policy deleted successfully!" -ForegroundColor Green
-            [System.Windows.Forms.MessageBox]::Show("Conditional Access Policy '$policyName' deleted successfully!", "Success")
-            
-            # Small delay before refresh
-            Start-Sleep -Seconds 1
-            Refresh-PoliciesList $listView
-            
+            $deletedCount++
+            Write-Host "Policy deleted successfully: $policyName" -ForegroundColor Green
         } catch {
-            Write-Host "❌ Error deleting policy: $($_.Exception.Message)" -ForegroundColor Red
-            
-            if ($_.Exception.Message -like "*NotFound*" -or $_.Exception.Message -like "*404*" -or $_.Exception.Message -like "*does not exist*") {
-                [System.Windows.Forms.MessageBox]::Show("The Conditional Access Policy '$policyName' was already deleted or does not exist. Refreshing list.", "Already Deleted")
-                Refresh-PoliciesList $listView
-            } else {
-                $errorMessage = "Error deleting Conditional Access Policy:`n`n"
-                $errorMessage += "Policy: $policyName`n"
-                $errorMessage += "Error: " + $_.Exception.Message + "`n`n"
-                $errorMessage += "Common causes:`n"
-                $errorMessage += "• Missing permissions (need Policy.ReadWrite.ConditionalAccess)`n"
-                $errorMessage += "• Policy is being used by other services`n"
-                $errorMessage += "• Network connectivity issues`n"
-                $errorMessage += "• Policy was already deleted by another admin"
-                
-                [System.Windows.Forms.MessageBox]::Show($errorMessage, "Delete Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-            }
+            Write-Host "Error deleting policy: $policyName - $($_.Exception.Message)" -ForegroundColor Red
+            $errors += "$policyName : $($_.Exception.Message)"
+            $errorCount++
         }
-    } else {
-        Write-Host "Policy deletion cancelled by user." -ForegroundColor Gray
+
+        if ($selectedCount -gt 1) {
+            Start-Sleep -Milliseconds 400
+        }
     }
+
+    $summary = "Deletion Summary:`n`nSuccessfully deleted: $deletedCount`n"
+    if ($skippedCount -gt 0) {
+        $summary += "Skipped: $skippedCount`n"
+    }
+    if ($errorCount -gt 0) {
+        $summary += "Errors: $errorCount`n"
+        foreach ($err in $errors) {
+            $summary += "  - $err`n"
+        }
+        $summary += "`nCommon causes: missing Policy.ReadWrite.ConditionalAccess, policy in use elsewhere, or network issues."
+    }
+
+    $boxIcon = if ($errorCount -gt 0) {
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    } elseif ($deletedCount -gt 0) {
+        [System.Windows.Forms.MessageBoxIcon]::Information
+    } else {
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    }
+    [System.Windows.Forms.MessageBox]::Show($summary, "Policy Deletion Complete", [System.Windows.Forms.MessageBoxButtons]::OK, $boxIcon)
+
+    Start-Sleep -Seconds 1
+    Refresh-PoliciesList $listView
 }
 
 function Copy-SelectedPolicy {
@@ -3929,6 +4551,8 @@ CONNECTION MANAGEMENT
 • Disconnect: End current session
 • Reset Auth: Clear stuck authentication sessions if connection hangs
 • Status shows "Connecting..." during authentication, then connection status
+• Graph sign-in: Interactive or WCM app-only tenant (EOA/ESR keys)
+• Toolkit app: Opens a dialog to update Graph permissions, run the full provisioner wizard, or delete matching app registrations (separate PowerShell window; admin roles required)
 
 ═══════════════════════════════════════════════════════════════
 NAMED LOCATIONS TAB
@@ -4094,7 +4718,7 @@ function Show-AboutDialog {
     
     # Version Label
     $versionLabel = New-Object System.Windows.Forms.Label
-    $versionLabel.Text = "Version 3.5"
+    $versionLabel.Text = "Version $($script:CAManagerVersion)"
     $versionLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
     $versionLabel.Location = New-Object System.Drawing.Point(20, 55)
     $versionLabel.Size = New-Object System.Drawing.Size(470, 25)
@@ -4135,6 +4759,8 @@ Built with:
 - PowerShell Windows Forms
 - Microsoft Graph PowerShell SDK
 - PS2EXE (for executable compilation)
+
+Note: Git changes apply when you run .\ca2.ps1 or ca_manager.bat. A compiled .exe embeds an old copy of the script until you rebuild it with PS2EXE.
 "@
     $infoTextBox.Text = $infoContent
     $form.Controls.Add($infoTextBox)
@@ -4157,10 +4783,10 @@ function Create-MainForm {
     $form.Size = New-Object System.Drawing.Size(1000, 700)
     $form.StartPosition = "CenterScreen"
 
-    # Connection Buttons Panel
+    # Connection Buttons Panel (second row: WCM / interactive sign-in like ESR/XOA)
     $connectionPanel = New-Object System.Windows.Forms.Panel
     $connectionPanel.Location = New-Object System.Drawing.Point(10, 10)
-    $connectionPanel.Size = New-Object System.Drawing.Size(970, 35)
+    $connectionPanel.Size = New-Object System.Drawing.Size(970, 68)
     $form.Controls.Add($connectionPanel)
 
     # Connect Button
@@ -4211,10 +4837,36 @@ function Create-MainForm {
     })
     $connectionPanel.Controls.Add($script:resetAuthButton)
 
-    # Status Label
+    $authLbl = New-Object System.Windows.Forms.Label
+    $authLbl.Text = "Graph sign-in:"
+    $authLbl.Location = New-Object System.Drawing.Point(0, 42)
+    $authLbl.Size = New-Object System.Drawing.Size(78, 22)
+    $connectionPanel.Controls.Add($authLbl)
+
+    $script:wcmTenantCombo = New-Object System.Windows.Forms.ComboBox
+    $script:wcmTenantCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $script:wcmTenantCombo.Location = New-Object System.Drawing.Point(82, 38)
+    $script:wcmTenantCombo.Size = New-Object System.Drawing.Size(318, 28)
+    $connectionPanel.Controls.Add($script:wcmTenantCombo)
+    Update-WcmAuthComboBox
+
+    $toolkitAppButton = New-Object System.Windows.Forms.Button
+    $toolkitAppButton.Text = "Toolkit app"
+    $toolkitAppButton.Location = New-Object System.Drawing.Point(408, 36)
+    $toolkitAppButton.Size = New-Object System.Drawing.Size(102, 28)
+    $toolkitAppButton.BackColor = [System.Drawing.Color]::LightSteelBlue
+    $toolkitAppButton.Add_Click({ Show-GraphToolkitProvisionerDialog })
+    $connectionPanel.Controls.Add($toolkitAppButton)
+    $wcmToolTip = New-Object System.Windows.Forms.ToolTip
+    $wcmTipText = "App-only: client id and secret stored as EOA-GraphApp-{tenant} or ESR-GraphApp-{tenant} in Windows Credential Manager (same as Entra Secret Rotate / Exchange Online Analyzer). Use Scripts\New-UnifiedGraphToolkitApp.ps1 -SaveToWCM to store them."
+    [void]$wcmToolTip.SetToolTip($script:wcmTenantCombo, $wcmTipText)
+    [void]$wcmToolTip.SetToolTip($authLbl, $wcmTipText)
+    [void]$wcmToolTip.SetToolTip($toolkitAppButton, "Add/fix Graph API permissions, full provisioner wizard, or delete toolkit registrations (like New-UnifiedGraphToolkitApp.ps1 / XOA remove-app). Opens PowerShell.")
+
+    # Status Label (X must clear Reset Auth: 470+100; leave a small gap before About ~790)
     $script:statusLabel = New-Object System.Windows.Forms.Label
     $script:statusLabel.Text = "Not connected"
-    $script:statusLabel.Location = New-Object System.Drawing.Point(580, 5)
+    $script:statusLabel.Location = New-Object System.Drawing.Point(578, 8)
     $script:statusLabel.Size = New-Object System.Drawing.Size(200, 20)
     $script:statusLabel.ForeColor = [System.Drawing.Color]::Red
     $connectionPanel.Controls.Add($script:statusLabel)
@@ -4247,8 +4899,8 @@ function Create-MainForm {
 
     # Tab Control
     $tabControl = New-Object System.Windows.Forms.TabControl
-    $tabControl.Location = New-Object System.Drawing.Point(10, 55)
-    $tabControl.Size = New-Object System.Drawing.Size(960, 590)
+    $tabControl.Location = New-Object System.Drawing.Point(10, 82)
+    $tabControl.Size = New-Object System.Drawing.Size(960, 563)
     $form.Controls.Add($tabControl)
 
     # Named Locations Tab
@@ -4262,6 +4914,7 @@ function Create-MainForm {
     $script:namedLocationsListView.Size = New-Object System.Drawing.Size(920, 400)
     $script:namedLocationsListView.View = "Details"
     $script:namedLocationsListView.FullRowSelect = $true
+    $script:namedLocationsListView.MultiSelect = $true
     $script:namedLocationsListView.GridLines = $true
     $script:namedLocationsListView.Columns.Add("Display Name", 200) | Out-Null
     $script:namedLocationsListView.Columns.Add("Type", 100) | Out-Null
@@ -4343,6 +4996,7 @@ function Create-MainForm {
     $script:policiesListView.Size = New-Object System.Drawing.Size(920, 400)
     $script:policiesListView.View = "Details"
     $script:policiesListView.FullRowSelect = $true
+    $script:policiesListView.MultiSelect = $true
     $script:policiesListView.GridLines = $true
     $script:policiesListView.Columns.Add("Display Name", 200) | Out-Null
     $script:policiesListView.Columns.Add("State", 100) | Out-Null

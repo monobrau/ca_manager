@@ -119,10 +119,12 @@ A powerful GUI-based PowerShell tool for managing Microsoft Entra (Azure AD) Con
 
 ### Connecting to Microsoft Graph
 
-1. Click **"Connect to Microsoft Graph"**
-2. Complete the authentication flow in your browser
-3. Grant the required permissions
-4. The status will show your connected tenant
+1. Under **Graph sign-in**, choose **Interactive** (browser sign-in) or a **tenant** listed from Windows Credential Manager (WCM). WCM entries use the same **EOA-GraphApp-** / **ESR-GraphApp-** client-secret keys as Exchange Online Analyzer and Entra Secret Rotate when you provision with **`New-UnifiedGraphToolkitApp.ps1 -SaveToWCM`**.
+2. Click **"Connect to Microsoft Graph"**
+3. For **Interactive**, complete the browser flow and grant permissions. For a **WCM tenant**, the tool connects with **client credentials** (app-only); the status line shows **(app-only)** when applicable.
+4. The status shows your connected tenant.
+
+**Reconnect / Change tenant** always uses **interactive** sign-in (delegated). To switch to another WCM app-only tenant, disconnect first, pick the tenant in **Graph sign-in**, then connect again.
 
 ### Managing Named Locations
 
@@ -228,12 +230,59 @@ $requiredScopes = @(
 )
 ```
 
+### One app registration for CA Manager, Entra Secret Rotate, and Exchange Online Analyzer
+
+Use the provisioning script (run once as a Global Administrator or Cloud Application Administrator):
+
+```powershell
+cd <path-to-ca_manager>
+Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Applications, CredentialManager -Scope CurrentUser
+.\Scripts\New-UnifiedGraphToolkitApp.ps1 -SaveToWCM
+```
+
+- Registers **delegated** permissions (for interactive `Connect-MgGraph` with `-ClientId`) and **application** permissions (for client-credentials / WCM), including **`Policy.ReadWrite.ConditionalAccess`** for Conditional Access **writes** and **`Organization.Read.All`** (application) so the toolkit can read tenant display names for the WCM dropdown via `GET /organization`.
+- With **`-SaveToWCM`**, saves the client secret under both **`EOA-GraphApp-{tenantId}`** and **`ESR-GraphApp-{tenantId}`** so existing analyzer and secret-rotate code paths resolve the same credentials.
+- On every workstation that runs these tools, set:
+
+  **`M365_GRAPH_TOOLKIT_CLIENT_ID`** = the script’s Application (client) ID  
+
+  (`CA_MANAGER_GRAPH_CLIENT_ID` is also supported for CA Manager only.)
+
+The script prints the client secret once; store it securely. Re-consent in Entra if you add permissions later.
+
+**If the app already exists** (same display name), the script compares required Microsoft Graph delegated and application permissions, public client redirect URIs, and sign-in audience. It then prompts to **Update** (patch manifest, merge redirects, grant missing app roles and delegated consent), **Replace** (delete and recreate — new client ID), or **Quit**. Non-interactive flags: **`-UpdateExisting`**, **`-ReplaceExisting`** (optional **`-Force`** to skip the `DELETE` confirmation), **`-NewSecret`** to rotate the secret after an update.
+
+**From the CA Manager window**, use the **Toolkit app** button (next to **Graph sign-in**) to open a small dialog that starts a **separate PowerShell** session (WAM sign-in with `Application.ReadWrite.All` and `AppRoleAssignment.ReadWrite.All`):
+
+- **Update permissions** — runs `New-UnifiedGraphToolkitApp.ps1 -UpdateExisting` (optional new secret / **`-SaveToWCM`** / multi-tenant audience checkboxes).
+- **Full wizard** — same script without **`-UpdateExisting`** (create, compare, Update/Replace/Quit prompts).
+- **Delete matching apps** — runs **`Scripts\Remove-UnifiedGraphToolkitApp.ps1`**, which removes **every** app registration with the given display name (like XOA’s `Remove-GraphInboxRulesApp.ps1`), with optional removal of local **EOA/ESR** Credential Manager entries for the signed-in tenant.
+
 ### Multi-Tenant Support
 
 Use the **"Reconnect/Change Tenant"** button to:
 - Switch between different tenants
 - Specify a particular tenant ID
 - Re-authenticate with different credentials
+
+### Reusing a Graph sign-in (same PowerShell process)
+
+If you already ran `Connect-MgGraph` in **this same PowerShell window** with the permissions CA Manager needs, clicking **Connect** can **reuse** that session so you are not prompted again (WAM/browser SSO is shared inside the process via the Graph auth module).
+
+This does **not** apply when you start CA Manager as a **new process** (typical double-click / separate `pwsh` window): each process has its own token cache.
+
+Optional: set environment variable `CA_MANAGER_AUTO_REUSE_GRAPH=1` to reuse a qualifying session **without** the confirmation dialog (automation / nested scripts).
+
+### How this compares to other repos (entrasecretrotate, exchangeonlineanalyzer)
+
+| Tool | Typical Graph auth | App / delegated notes |
+|------|--------------------|------------------------|
+| **All three (same app)** | `Scripts\New-UnifiedGraphToolkitApp.ps1` | Default Entra name **`River Run Security Investigator`** (same as **exchangeonlineanalyzer** `New-GraphInboxRulesApp.ps1`). One registration: delegated + application roles for CA Manager, ESR, and XOA. Use **`M365_GRAPH_TOOLKIT_CLIENT_ID`** / **`CA_MANAGER_GRAPH_CLIENT_ID`** for interactive sign-in; **`-SaveToWCM`** for app-only (EOA/ESR keys). |
+| **CA Manager** | **Interactive** `Connect-MgGraph` (optional **`-ClientId`** from env) **or** **WCM app-only** (same EOA/ESR keys as the other tools) | Same app registration as XOA/ESR when provisioned with the defaults above |
+| **entrasecretrotate** | Interactive **or** app-only from Credential Manager | WCM: **client credentials** to **River Run Security Investigator** (or whatever app name you used with **`-SaveToWCM`**) |
+| **exchangeonlineanalyzer** | Interactive Graph, **or** WCM app-only | **`River Run Security Investigator`**; use **Toolkit app** in CA Manager or **`New-UnifiedGraphToolkitApp.ps1`** to add any missing CA/ESR permissions on that same registration |
+
+WAM is the Windows broker used by default for interactive `Connect-MgGraph` on current module versions. **exchangeonlineanalyzer** sometimes **disables** the broker (`AZURE_IDENTITY_DISABLE_BROKER`) so the **system browser** is used—still the same MSAL cache for that process, not a shared “session” across unrelated EXEs.
 
 ## 🐛 Troubleshooting
 
@@ -299,7 +348,23 @@ The tool provides:
 
 ## 📊 Version History
 
-- **v3.5** (Current)
+- **v3.8** (Current)
+  - **`Scripts\New-UnifiedGraphToolkitApp.ps1`**: if an app with the same display name exists, **verifies** all toolkit permissions, redirects, and audience; offers **Update** vs **Replace** vs **Quit** (`-UpdateExisting` / `-ReplaceExisting` / `-NewSecret` for automation)
+  - **`Modules\GraphToolkitCredential.psm1`**: saves the same client secret to **EOA** and **ESR** WCM key prefixes
+  - **`M365_GRAPH_TOOLKIT_CLIENT_ID`** (or `CA_MANAGER_GRAPH_CLIENT_ID`) passed to `Connect-MgGraph` as **`-ClientId`**
+  - **entrasecretrotate**: WCM token lookup tries **EOA** then **ESR** prefix; interactive connect uses toolkit client id from env
+
+- **v3.7**
+  - **Reuse existing Graph session** when `Get-MgContext` already has this tool’s required **delegated** scopes in the **same PowerShell process** (prompt to skip a second login; optional `CA_MANAGER_AUTO_REUSE_GRAPH=1`)
+  - README: comparison with **entrasecretrotate** / **exchangeonlineanalyzer** permissions and auth models
+
+- **v3.6**
+  - **Bulk policy delete** deletes every selected policy (with summary), not only the first row
+  - **Tenant field validation** on connect (GUID or domain-style; rejects unsafe characters)
+  - **Safer batch launcher**: working directory, `-NoProfile`, file existence checks, clearer exit handling
+  - Large Graph error response bodies truncated before JSON formatting for stability
+
+- **v3.5**
   - Added "Reset Auth" button to clear stuck authentication sessions
   - Connection state tracking with visual "Connecting..." status
   - In-app help dialog with quick start guide
