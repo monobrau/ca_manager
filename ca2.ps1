@@ -387,7 +387,8 @@ function Get-CAManagerMergedWcmTenants {
     if (-not (Get-Command Get-WCMTenantListWithNames -ErrorAction SilentlyContinue)) { return @() }
     $byId = @{}
     foreach ($pfx in @('EOA', 'ESR')) {
-        foreach ($row in @(Get-WCMTenantListWithNames -Prefix $pfx -ErrorAction SilentlyContinue)) {
+        # SkipGraphLookup: no per-tenant token + Graph /organization (ESR-style slowness); use WCM DisplayName rows or GUID until post-connect cache fills
+        foreach ($row in @(Get-WCMTenantListWithNames -Prefix $pfx -SkipGraphLookup -ErrorAction SilentlyContinue)) {
             $tid = [string]$row.TenantId
             $text = [string]$row.DisplayText
             if (-not $byId.ContainsKey($tid)) {
@@ -2989,23 +2990,7 @@ function Copy-SelectedPolicy {
         # Clean the policy of null values
         $cleanedPolicy = Remove-NullValues $newPolicyBody
         
-        # Debug: Show the array types before JSON conversion
-        Write-Host "DEBUG: Checking array preservation..." -ForegroundColor Magenta
-        if ($cleanedPolicy.grantControls.builtInControls) {
-            Write-Host "builtInControls type: $($cleanedPolicy.grantControls.builtInControls.GetType().Name), Count: $($cleanedPolicy.grantControls.builtInControls.Count)" -ForegroundColor Magenta
-        }
-        if ($cleanedPolicy.conditions.users.includeUsers) {
-            Write-Host "includeUsers type: $($cleanedPolicy.conditions.users.includeUsers.GetType().Name), Count: $($cleanedPolicy.conditions.users.includeUsers.Count)" -ForegroundColor Magenta
-        }
-        
-        # Convert to JSON and show for debugging
         $jsonBody = $cleanedPolicy | ConvertTo-Json -Depth 10
-        Write-Host "JSON being sent (first 800 chars):" -ForegroundColor Gray
-        Write-Host $jsonBody.Substring(0, [Math]::Min(800, $jsonBody.Length)) -ForegroundColor Gray
-        
-        if ($jsonBody.Length -gt 800) {
-            Write-Host "... (truncated, total length: $($jsonBody.Length) chars)" -ForegroundColor Gray
-        }
         
         # Use REST API
         $uri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies"
